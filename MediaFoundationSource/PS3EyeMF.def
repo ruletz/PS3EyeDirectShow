@@ -1,0 +1,11 @@
+; PS3EyeMF.def
+; Module definition file for PS3 Eye Media Foundation Source
+; Exports COM entry points for DLL registration
+
+LIBRARY
+
+EXPORTS
+    DllGetClassObject   PRIVATE
+    DllCanUnloadNow     PRIVATE
+    DllRegisterServer   PRIVATE
+    DllUnregisterServer PRIVATE
