@@ -10,7 +10,8 @@
 
 PS3EyeSharedMemoryServer::PS3EyeSharedMemoryServer()
     : m_fileMapping(nullptr), m_mutex(nullptr), m_newFrameEvent(nullptr),
-      m_clientEvent(nullptr), m_sharedMemory(nullptr), m_frameNumber(0) {}
+      m_clientEvent(nullptr), m_kernelReaderEvent(nullptr),
+      m_sharedMemory(nullptr), m_frameNumber(0) {}
 
 PS3EyeSharedMemoryServer::~PS3EyeSharedMemoryServer() { Close(); }
 
@@ -70,6 +71,24 @@ bool PS3EyeSharedMemoryServer::Create() {
     return false;
   }
 
+  // Manual-reset so the service can query the current state at any time; the
+  // kernel driver resets it when the last app closes the camera.
+  m_kernelReaderEvent =
+      CreateEventW(nullptr, TRUE, FALSE, PS3EYE_KERNEL_READER_EVENT_NAME);
+  if (!m_kernelReaderEvent) {
+    UnmapViewOfFile(m_sharedMemory);
+    CloseHandle(m_fileMapping);
+    CloseHandle(m_clientEvent);
+    CloseHandle(m_newFrameEvent);
+    CloseHandle(m_mutex);
+    m_sharedMemory = nullptr;
+    m_fileMapping = nullptr;
+    m_clientEvent = nullptr;
+    m_newFrameEvent = nullptr;
+    m_mutex = nullptr;
+    return false;
+  }
+
   // Initialize header
   PS3EyeFrameHeader *header = static_cast<PS3EyeFrameHeader *>(m_sharedMemory);
   ZeroMemory(header, sizeof(PS3EyeFrameHeader));
@@ -116,6 +135,11 @@ void PS3EyeSharedMemoryServer::Close() {
     m_clientEvent = nullptr;
   }
 
+  if (m_kernelReaderEvent) {
+    CloseHandle(m_kernelReaderEvent);
+    m_kernelReaderEvent = nullptr;
+  }
+
   if (m_mutex) {
     CloseHandle(m_mutex);
     m_mutex = nullptr;
@@ -130,17 +154,31 @@ LONG PS3EyeSharedMemoryServer::GetClientCount() const {
   return header->clientCount;
 }
 
+bool PS3EyeSharedMemoryServer::HasKernelReader() const {
+  if (!m_kernelReaderEvent)
+    return false;
+  return WaitForSingleObject(m_kernelReaderEvent, 0) == WAIT_OBJECT_0;
+}
+
 bool PS3EyeSharedMemoryServer::WaitForClients(DWORD timeoutMs) {
   if (!m_clientEvent)
     return false;
 
-  // Check if already have clients
-  if (GetClientCount() > 0)
+  // Check if already have a reader of either kind
+  if (GetClientCount() > 0 || HasKernelReader())
     return true;
 
-  // Wait for client event
-  DWORD result = WaitForSingleObject(m_clientEvent, timeoutMs);
-  return (result == WAIT_OBJECT_0 || GetClientCount() > 0);
+  // Wait for either a user-mode client or the kernel reader to attach
+  HANDLE handles[2];
+  DWORD count = 0;
+  handles[count++] = m_clientEvent;
+  if (m_kernelReaderEvent)
+    handles[count++] = m_kernelReaderEvent;
+
+  DWORD result = WaitForMultipleObjects(count, handles, FALSE, timeoutMs);
+  if (result < WAIT_OBJECT_0 + count)
+    return true;
+  return GetClientCount() > 0 || HasKernelReader();
 }
 
 bool PS3EyeSharedMemoryServer::WriteFrame(const uint8_t *frameData,

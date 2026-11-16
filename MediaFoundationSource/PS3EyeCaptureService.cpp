@@ -109,8 +109,9 @@ void CaptureLoop() {
         perfFreq.QuadPart;
     sharedMemory.WriteFrame(frameBuffer.data(), PS3EYE_FRAME_SIZE, timestamp);
 
-    // Check clients
-    if (sharedMemory.GetClientCount() <= 0) {
+    // Check clients. The kernel camera driver is a reader too, but it cannot
+    // bump the user-mode client count, so it is polled separately.
+    if (sharedMemory.GetClientCount() <= 0 && !sharedMemory.HasKernelReader()) {
       if (++noClientFrames > 30) {
         stopCamera();
         noClientFrames = 0;
@@ -145,14 +146,20 @@ bool InstallService() {
   wchar_t path[MAX_PATH];
   GetModuleFileNameW(nullptr, path, MAX_PATH);
 
+  // The service is installed under Program Files, so the path must be quoted:
+  // an unquoted "C:\Program Files\..." makes the SCM fail to start the service.
+  wchar_t binaryPath[MAX_PATH + 2];
+  swprintf_s(binaryPath, L"\"%s\"", path);
+
   SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
   if (!scm)
     return false;
 
   SC_HANDLE svc = CreateServiceW(scm, SERVICE_NAME, L"PS3 Eye Capture Service",
                                  SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
-                                 SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, path,
-                                 nullptr, nullptr, nullptr, nullptr, nullptr);
+                                 SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
+                                 binaryPath, nullptr, nullptr, nullptr, nullptr,
+                                 nullptr);
 
   if (!svc) {
     CloseServiceHandle(scm);

@@ -1,0 +1,158 @@
+name: Build driver
+
+# UNTESTED: never run. The driver it builds has never been compiled either, so
+# the first scheduled run is expected to fail and produce the error list this
+# workflow exists to collect. Treat the SDK/WDK install step as untested too.
+#
+# Builds the AVStream camera driver and the capture service in the cloud, so no
+# Visual Studio / WDK install is needed on a developer machine. Artifacts are
+# test-signed with a throwaway self-signed certificate: they load on a test
+# machine only if that machine has `bcdedit /set testsigning on`.
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'Win11VirtualCamera/**'
+      - 'MediaFoundationSource/**'
+      - '.github/workflows/build-driver.yml'
+  pull_request:
+    paths:
+      - 'Win11VirtualCamera/**'
+      - 'MediaFoundationSource/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      # The WDK is not part of the runner image. Install the SDK it needs, then
+      # the WDK; "/features +" pulls in the Visual Studio integration, which is
+      # what makes the WindowsKernelModeDriver10.0 platform toolset resolve.
+      - name: Install Windows SDK and WDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          curl.exe -sSL -o winsdksetup.exe https://aka.ms/winsdksetup
+          $sdk = Start-Process .\winsdksetup.exe -ArgumentList '/features +','/quiet','/norestart' -Wait -PassThru
+          Write-Host "SDK setup exit code: $($sdk.ExitCode)"
+          # 0 = success, 3010 = success but a reboot would be pending (fine here)
+          if ($sdk.ExitCode -ne 0 -and $sdk.ExitCode -ne 3010) {
+            throw "SDK setup failed with $($sdk.ExitCode)"
+          }
+
+          curl.exe -sSL -o wdksetup.exe https://aka.ms/wdksetup
+          $wdk = Start-Process .\wdksetup.exe -ArgumentList '/features +','/quiet','/norestart' -Wait -PassThru
+          Write-Host "WDK setup exit code: $($wdk.ExitCode)"
+          if ($wdk.ExitCode -ne 0 -and $wdk.ExitCode -ne 3010) {
+            throw "WDK setup failed with $($wdk.ExitCode)"
+          }
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Show toolchain
+        shell: pwsh
+        run: |
+          Write-Host "--- Windows Kits ---"
+          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty Name
+          Write-Host "--- WDK build props ---"
+          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\build' -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty Name
+
+      # User-mode pieces (MF virtual camera + registrar). These are expected to
+      # build; if they break, the problem is local to this step.
+      - name: Build user-mode projects
+        run: msbuild Win11VirtualCamera\PS3EyeWin11.sln /p:Configuration=Release /p:Platform=x64 /v:minimal /nologo
+
+      # The driver. This is the step that has never run: expect real errors here
+      # the first time. The log is the whole point of this job.
+      - name: Build AVStream driver
+        run: msbuild Win11VirtualCamera\KernelDriver\PS3EyeVCamKernel.vcxproj /p:Configuration=Release /p:Platform=x64 /p:SolutionDir=Win11VirtualCamera\ /v:minimal /nologo
+
+      - name: Build capture service
+        run: msbuild MediaFoundationSource\PS3EyeCaptureService.vcxproj /p:Configuration=Release /p:Platform=x64 /p:SolutionDir=MediaFoundationSource\ /v:minimal /nologo
+
+      - name: Make catalog
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = (Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' |
+                  Sort-Object Name | Select-Object -Last 1).Name
+          $inf2cat = "C:\Program Files (x86)\Windows Kits\10\bin\$ver\x86\Inf2Cat.exe"
+          if (-not (Test-Path $inf2cat)) { throw "Inf2Cat not found at $inf2cat" }
+
+          $out = 'Win11VirtualCamera\bin\x64\Release'
+          Copy-Item 'Win11VirtualCamera\KernelDriver\PS3EyeVCamKernel.inf' $out -Force
+          & $inf2cat /driver:$out /os:10_X64 /verbose
+          if ($LASTEXITCODE -ne 0) { throw "Inf2Cat failed with $LASTEXITCODE" }
+
+      # Throwaway certificate. A kernel driver will not load unsigned at all,
+      # and test signing accepts a self-signed cert once it is in the stores.
+      - name: Test-sign the driver package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Resolve-Path 'Win11VirtualCamera\bin\x64\Release'
+
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert `
+            -Subject 'CN=PS3EyeTest' `
+            -CertStoreLocation 'Cert:\CurrentUser\My' `
+            -HashAlgorithm SHA256 -KeyUsage DigitalSignature `
+            -NotAfter (Get-Date).AddYears(2)
+          $thumb = $cert.Thumbprint
+          Write-Host "Cert thumbprint: $thumb"
+
+          Export-Certificate -Cert $cert -FilePath "$out\PS3EyeTest.cer" | Out-Null
+          $pw = ConvertTo-SecureString -String 'ps3eye' -Force -AsPlainText
+          Export-PfxCertificate -Cert $cert -FilePath "$out\PS3EyeTest.pfx" -Password $pw | Out-Null
+
+          # Trust the cert in this store only so signtool is happy; the test
+          # machine needs PS3EyeTest.cer in LocalMachine\Trusted Root and
+          # Trusted Publishers.
+          $root = New-Object System.Security.Cryptography.X509Certificates.X509Store('Root', 'CurrentUser')
+          $root.Open('ReadWrite'); $root.Add($cert); $root.Close()
+
+          $ver = (Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Directory |
+                  Sort-Object Name | Select-Object -Last 1).Name
+          $signtool = "C:\Program Files (x86)\Windows Kits\10\bin\$ver\x64\signtool.exe"
+          if (-not (Test-Path $signtool)) { throw "signtool not found at $signtool" }
+
+          foreach ($f in @("$out\PS3EyeVCamKernel.sys", "$out\PS3EyeVCamKernel.cat")) {
+            & $signtool sign /v /fd SHA256 /sha1 $thumb $f
+            if ($LASTEXITCODE -ne 0) { throw "signtool failed on $f with $LASTEXITCODE" }
+          }
+          & $signtool verify /v /pa "$out\PS3EyeVCamKernel.cat"
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          $dest = 'artifacts'
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+
+          $driverOut = 'Win11VirtualCamera\bin\x64\Release'
+          foreach ($name in 'PS3EyeVCamKernel.sys','PS3EyeVCamKernel.cat','PS3EyeVCamKernel.inf',
+                            'PS3EyeVCamSource.dll','PS3EyeVCamRegistrar.exe',
+                            'PS3EyeTest.cer','PS3EyeTest.pfx') {
+            $p = Join-Path $driverOut $name
+            if (Test-Path $p) { Copy-Item $p $dest -Force } else { Write-Host "missing: $name" }
+          }
+          Copy-Item 'Win11VirtualCamera\KernelDriver\Install-PS3EyeDriver.ps1' $dest -Force
+
+          $svc = 'MediaFoundationSource\bin\x64\Release\PS3EyeCaptureService.exe'
+          if (Test-Path $svc) { Copy-Item $svc $dest -Force } else { Write-Host "missing: PS3EyeCaptureService.exe" }
+
+          Get-ChildItem $dest | Select-Object Name, Length
+
+      # Runs even when a step failed, so a broken build still gives you the
+      # binaries that did get produced plus the log.
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS3EyeVCam
+          path: artifacts/
+          if-no-files-found: warn

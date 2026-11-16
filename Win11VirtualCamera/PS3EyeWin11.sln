@@ -1,0 +1,33 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "PS3EyeVCamSource", "PS3EyeVCamSource.vcxproj", "{C7D1E9A2-3B4F-4A86-9C77-5E2A1F0B4D31}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "PS3EyeVCamRegistrar", "PS3EyeVCamRegistrar.vcxproj", "{5E8B2C41-7D3A-4F16-A9E2-B6C40D17F852}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "PS3EyeVCamKernel", "KernelDriver\PS3EyeVCamKernel.vcxproj", "{3FD8B7C4-51A2-4E9B-8C63-2A7E5D90F4B6}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{C7D1E9A2-3B4F-4A86-9C77-5E2A1F0B4D31}.Debug|x64.ActiveCfg = Debug|x64
+		{C7D1E9A2-3B4F-4A86-9C77-5E2A1F0B4D31}.Debug|x64.Build.0 = Debug|x64
+		{C7D1E9A2-3B4F-4A86-9C77-5E2A1F0B4D31}.Release|x64.ActiveCfg = Release|x64
+		{C7D1E9A2-3B4F-4A86-9C77-5E2A1F0B4D31}.Release|x64.Build.0 = Release|x64
+		{5E8B2C41-7D3A-4F16-A9E2-B6C40D17F852}.Debug|x64.ActiveCfg = Debug|x64
+		{5E8B2C41-7D3A-4F16-A9E2-B6C40D17F852}.Debug|x64.Build.0 = Debug|x64
+		{5E8B2C41-7D3A-4F16-A9E2-B6C40D17F852}.Release|x64.ActiveCfg = Release|x64
+		{5E8B2C41-7D3A-4F16-A9E2-B6C40D17F852}.Release|x64.Build.0 = Release|x64
+		{3FD8B7C4-51A2-4E9B-8C63-2A7E5D90F4B6}.Debug|x64.ActiveCfg = Debug|x64
+		{3FD8B7C4-51A2-4E9B-8C63-2A7E5D90F4B6}.Debug|x64.Build.0 = Debug|x64
+		{3FD8B7C4-51A2-4E9B-8C63-2A7E5D90F4B6}.Release|x64.ActiveCfg = Release|x64
+		{3FD8B7C4-51A2-4E9B-8C63-2A7E5D90F4B6}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal
