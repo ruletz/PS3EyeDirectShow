@@ -121,7 +121,8 @@ jobs:
         run: |
           $proj = 'Win11VirtualCamera\CamInterfaceFilter\PS3EyeCamInterface.vcxproj'
           $log = "$env:RUNNER_TEMP\filter.log"
-          $out = & msbuild $proj /p:Configuration=Release /p:Platform=x64 `/n            /p:SolutionDir=$(Resolve-Path 'Win11VirtualCamera')\ /v:minimal /nologo 2>&1
+          $solutionDir = (Resolve-Path 'Win11VirtualCamera').Path + '\'
+          $out = & msbuild $proj /p:Configuration=Release /p:Platform=x64 "/p:SolutionDir=$solutionDir" /v:minimal /nologo 2>&1
           $code = $LASTEXITCODE
           $out | Set-Content $log
           $out | Write-Host
