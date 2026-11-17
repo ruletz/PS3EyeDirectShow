@@ -42,7 +42,10 @@ AddInterface=%KSCATEGORY_VIDEO_CAMERA%,,PS3Eye.Interface
 AddInterface=%KSCATEGORY_CAPTURE%,,PS3Eye.Interface
 
 [PS3Eye_Install.NT.Services]
-AddService=PS3EyeVCamKernel,%SPSVCINST_ASSOCSERVICE%,PS3Eye.Service
+; 0x00000002 = SPSVCINST_ASSOCSERVICE. The flag has to be the literal value:
+; the token is not defined by the build, and an unresolved flag leaves the
+; service unassociated, which makes device installation fail with 0xE0000219.
+AddService=PS3EyeVCamKernel,0x00000002,PS3Eye.Service
 
 [PS3Eye.Service]
 DisplayName=%ServiceDesc%
