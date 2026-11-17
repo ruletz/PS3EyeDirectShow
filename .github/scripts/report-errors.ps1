@@ -24,12 +24,28 @@ if ($errors.Count -eq 0) {
     exit 0
 }
 
-foreach ($e in ($errors | Select-Object -First 10)) {
-    $msg = ($e -replace '%', '%25' -replace "`r", '' -replace "`n", '%0A').Trim()
-    if ($msg.Length -gt 900) { $msg = $msg.Substring(0, 900) + '...' }
-    Write-Host "::error::${Label}: $msg"
+# GitHub allows 10 annotations per step, so pack several error lines into
+# each one: 10 annotations x ~900 chars still shows the whole first wave.
+$escaped = $errors | ForEach-Object { ($_ -replace '%', '%25' -replace "`r", '' -replace "`n", '%0A').Trim() }
+
+$batch = New-Object System.Collections.Generic.List[string]
+$length = 0
+$sent = 0
+foreach ($e in $escaped) {
+    if (($length + $e.Length) -gt 800 -and $batch.Count -gt 0) {
+        Write-Host "::error::${Label}: $($batch -join ' | ')"
+        $sent++
+        if ($sent -ge 10) { break }
+        $batch.Clear()
+        $length = 0
+    }
+    $batch.Add($e)
+    $length += $e.Length
+}
+if ($sent -lt 10 -and $batch.Count -gt 0) {
+    Write-Host "::error::${Label}: $($batch -join ' | ')"
 }
 
-if ($errors.Count -gt 10) {
-    Write-Host "::error::${Label}: $($errors.Count - 10) more error lines; see the uploaded logs"
+if ($errors.Count -gt 60) {
+    Write-Host "::warning::${Label}: $($errors.Count) error lines total; report truncated"
 }
