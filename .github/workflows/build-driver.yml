@@ -31,7 +31,11 @@ jobs:
   build:
     runs-on: windows-2022
     steps:
+      # The capture service compiles PS3EYEDriver/ps3eye.cpp, which lives in a
+      # submodule, so it has to be fetched too.
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       # Diagnostic only, never fails: if the image loses the WDK the following
       # build steps will say so, and this tells us where the kits live.
