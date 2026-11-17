@@ -50,10 +50,11 @@
 #endif
 
 // Both KS headers still describe user-mode-flavoured structures - the
-// DirectSound3D ones use BOOL and FLOAT, the audio ones DWORD, WORD and BYTE,
-// and a topology endpoint id is MAX_PATH long - but those type names only exist
-// in user-mode windef.h, which a driver never includes. Supply the same
-// underlying types so the headers parse; this driver uses none of them.
+// DirectSound3D ones use BOOL and FLOAT, the audio ones DWORD, WORD and BYTE, a
+// topology endpoint id is MAX_PATH long, and KS_VIDEOINFOHEADER is built on
+// RECT - but those names only exist in user-mode windef.h, which a driver never
+// includes. Supply the same underlying types so the headers parse; this driver
+// uses none of them.
 #if !defined(_WINDEF_)
 typedef LONG BOOL;
 typedef float FLOAT;
@@ -61,11 +62,22 @@ typedef ULONG DWORD;
 typedef USHORT WORD;
 typedef UCHAR BYTE;
 typedef ULONGLONG DWORDLONG;
+typedef struct tagRECT {
+    LONG left;
+    LONG top;
+    LONG right;
+    LONG bottom;
+} RECT, *PRECT;
 #endif
 
 #if !defined(MAX_PATH)
 #define MAX_PATH 260
 #endif
+
+// The kernel-mode half of ks.h annotates its prototypes with SAL
+// (_IRQL_requires_max_, _Outptr_result_maybenull_, ...), which ntddk.h does not
+// pull in.
+#include <sal.h>
 
 #include <ks.h>
 #include <ksmedia.h>
