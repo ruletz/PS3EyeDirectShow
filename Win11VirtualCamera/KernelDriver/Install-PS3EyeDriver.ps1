@@ -127,14 +127,10 @@ public static class PS3EyeRootDevice
     [DllImport("setupapi.dll", SetLastError = true)]
     private static extern bool SetupDiDestroyDeviceInfoList(IntPtr deviceInfoSet);
 
-    [DllImport("newdev.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern bool UpdateDriverForPlugAndPlayDevices(IntPtr hwndParent, string hardwareId,
-        string fullInfPath, int installFlags, out bool rebootRequired);
-
     private const int DIF_REGISTERDEVICE = 0x00000019;
     private const int SPDRP_HARDWAREID = 0x00000001;
     private const int DICD_GENERATE_ID = 0x00000001;
-    private const int INSTALLFLAG_FORCE = 0x00000001;
+
 
     public static string Create(string hardwareId, string deviceDescription, string infPath)
     {
@@ -165,12 +161,11 @@ public static class PS3EyeRootDevice
             if (!SetupDiCallClassInstaller(DIF_REGISTERDEVICE, set, ref info))
                 return "SetupDiCallClassInstaller failed (" + Marshal.GetLastWin32Error() + ")";
 
-            bool reboot = false;
-            if (!UpdateDriverForPlugAndPlayDevices(IntPtr.Zero, hardwareId, infPath,
-                    INSTALLFLAG_FORCE, out reboot))
-                return "UpdateDriverForPlugAndPlayDevices failed (" + Marshal.GetLastWin32Error() + ")";
-
-            return reboot ? "REBOOT" : "";
+            // No binding here: the package is already staged, so PnP installs it
+            // as soon as the node appears. UpdateDriverForPlugAndPlayDevices does
+            // the same thing further down the road and fails with ERROR_NO_SUCH_DEVINST
+            // while the new node is not in the hardware tree yet.
+            return "";
         }
         finally
         {
@@ -217,18 +212,28 @@ function Install-Driver {
     Write-Step ("Creating device node {0}..." -f $HardwareId)
     $result = [PS3EyeRootDevice]::Create($HardwareId, $DeviceDesc, $inf)
 
-    if ($result -eq 'REBOOT') {
-        Write-Step 'The driver was bound, but Windows wants a reboot to finish. No reboot was started.' 'WARN'
-    } elseif ($result -ne '') {
+    if ($result -ne '') {
         Write-Step $result 'ERROR'
         return
-    } else {
-        Write-Step 'Device node created and driver bound.' 'OK'
+    }
+    Write-Step 'Device node created; waiting for Windows to bind the staged driver.'
+
+    # The node appears driverless and PnP picks the staged package up on its own;
+    # a second pnputil pass just nudges it in case it has not started yet.
+    $device = $null
+    for ($i = 0; $i -lt 20 -and -not $device; $i++) {
+        Start-Sleep -Milliseconds 500
+        $device = Get-PnpDevice -ErrorAction SilentlyContinue |
+            Where-Object { $_.InstanceId -like ("{0}*" -f $HardwareId) } | Select-Object -First 1
+    }
+    if ($device -and $device.Status -ne 'OK') {
+        & pnputil.exe /add-driver "$inf" /install | ForEach-Object { Write-Step $_ }
+        Start-Sleep -Seconds 2
+        $device = Get-PnpDevice -ErrorAction SilentlyContinue |
+            Where-Object { $_.InstanceId -like ("{0}*" -f $HardwareId) } | Select-Object -First 1
     }
 
     try {
-        $device = Get-PnpDevice -ErrorAction Stop |
-            Where-Object { $_.InstanceId -like ("{0}*" -f $HardwareId) } | Select-Object -First 1
         if ($device) {
             Write-Step ("Present: {0} [{1}] ({2})" -f $device.FriendlyName, $device.Status, $device.InstanceId) 'OK'
         } else {
