@@ -164,7 +164,8 @@ jobs:
           $log = & $inf2cat /driver:$out /os:10_X64 /verbose 2>&1
           $code = $LASTEXITCODE
           $log | Write-Host
-          $bad = @($log | Where-Object { $_ -match 'Error|error|missing|not found' })
+          $bad = @($log | Where-Object { $_ -match 'Error|error|missing|not found' } |
+            Where-Object { $_ -notmatch '^\s*Inf2Cat: (Errors|Warnings)' })
           foreach ($b in ($bad | Select-Object -First 8)) { Write-Host "::error::Inf2Cat: $b" }
           exit $code
 
@@ -206,21 +207,11 @@ jobs:
           [IO.File]::WriteAllBytes("$out\PS3EyeTest.cer", $cert.Export('Cert'))
           Write-Host '::notice::exported cer and pfx'
 
-          # Trust the cert here only so signtool's verify is happy; the test
+          # The runner refuses to install a root certificate (the store add
+          # blocks on a prompt nobody can answer), so the chain will show up as
+          # untrusted here; the verify step accepts exactly that. The test
           # machine needs PS3EyeTest.cer in LocalMachine\Trusted Root and
-          # Trusted Publishers. X509Store.Add blocks on a trust prompt on this
-          # image, so use certutil, capped in case it does the same.
-          $p = Start-Process -FilePath "$env:WINDIR\System32\certutil.exe" -NoNewWindow -PassThru `
-            -ArgumentList @('-user', '-addstore', '-f', 'Root', "$out\PS3EyeTest.cer") `
-            -RedirectStandardOutput "$env:RUNNER_TEMP\certutil.log" `
-            -RedirectStandardError "$env:RUNNER_TEMP\certutil.log.err"
-          if (-not $p.WaitForExit(90 * 1000)) {
-            $p.Kill()
-            Write-Host '::warning::certutil did not return; verification will run untrusted'
-          } else {
-            Get-Content "$env:RUNNER_TEMP\certutil.log", "$env:RUNNER_TEMP\certutil.log.err" `
-              -ErrorAction SilentlyContinue | Write-Host
-          }
+          # Trusted Publishers.
           Write-Host '::notice::certificate is ready'
 
       - name: Sign the driver package
@@ -280,8 +271,18 @@ jobs:
             Write-Host '::error::signtool verify timed out'
             exit 1
           }
-          Get-Content $logPath, "$logPath.err" -ErrorAction SilentlyContinue | Write-Host
-          if ($p.ExitCode -ne 0) { Write-Host '::error::signtool verify /pa failed'; exit $p.ExitCode }
+          $text = (Get-Content $logPath, "$logPath.err" -ErrorAction SilentlyContinue) -join "`n"
+          Write-Host $text
+          if ($p.ExitCode -eq 0) { exit 0 }
+
+          # Without the certificate in a trusted root store the only thing that
+          # may fail is the chain; a bad signature must still fail the build.
+          if ($text -match 'root certificate which is not trusted') {
+            Write-Host '::notice::signature is valid; chain ends in the untrusted test certificate'
+            exit 0
+          }
+          Write-Host '::error::signtool verify /pa failed'
+          exit $p.ExitCode
 
       - name: Collect artifacts
         shell: pwsh
