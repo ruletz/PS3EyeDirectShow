@@ -107,6 +107,21 @@ jobs:
           & "$env:GITHUB_WORKSPACE\.github\scripts\report-errors.ps1" $log 'driver build'
           exit $code
 
+      # Temporary: print the WDK header lines the driver trips over, since the
+      # run log only shows the diagnostic, not the source it came from.
+      - name: Dump header context
+        if: failure()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $path = 'C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared\ksmedia.h'
+          $lines = Get-Content $path
+          foreach ($start in 1405, 1412) {
+            $text = ($lines | Select-Object -Skip ($start - 1) -First 8) -join ' // '
+            $text = $text -replace '%', '%25'
+            Write-Host "::error::ksmedia ${start}: $text"
+          }
+
       - name: Build capture service
         shell: pwsh
         run: |
