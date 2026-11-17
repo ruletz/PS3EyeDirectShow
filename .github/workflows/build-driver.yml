@@ -74,17 +74,36 @@ jobs:
           & "$env:GITHUB_WORKSPACE\.github\scripts\report-errors.ps1" $log 'user-mode build'
           exit $code
 
-      # The step that has never run: expect real errors the first time.
+      # The step that has never run: expect real errors the first time. Built
+      # on its own, because a kernel project cannot share the solution's
+      # user-mode build: it needs the WindowsKernelModeDriver toolset and the
+      # kit's km headers, and the solution never applied them.
       - name: Build AVStream driver
         shell: pwsh
         run: |
+          $proj = 'Win11VirtualCamera\KernelDriver\PS3EyeVCamKernel.vcxproj'
           $log = "$env:RUNNER_TEMP\driver.log"
-          $out = & msbuild Win11VirtualCamera\KernelDriver\PS3EyeVCamKernel.vcxproj `
+
+          # Which toolset the project actually resolves to, for the annotation.
+          $props = & msbuild $proj /p:Configuration=Release /p:Platform=x64 `
+            '-getProperty:PlatformToolset' '-getProperty:ConfigurationType' `
+            '-getProperty:WindowsTargetPlatformVersion' 2>&1
+          Write-Host "::warning::driver properties: $($props -join ' ')"
+
+          # /v:diag so the cl.exe command line is in the log; the header conflict
+          # this project hits is decided by the include paths and defines there.
+          $out = & msbuild $proj `
             /p:Configuration=Release /p:Platform=x64 /p:SolutionDir=$(Resolve-Path 'Win11VirtualCamera')\ `
-            /v:minimal /nologo 2>&1
+            /v:diag /nologo 2>&1
           $code = $LASTEXITCODE
           $out | Set-Content $log
           $out | Write-Host
+
+          $cl = @($out | Where-Object { $_ -match 'cl\.exe .*PS3EyeVCamKernel\.c' } | Select-Object -First 1)
+          $clmsg = if ($cl) { $cl[0].Trim() } else { 'cl.exe command line not found in log' }
+          if ($clmsg.Length -gt 900) { $clmsg = $clmsg.Substring(0, 900) + '...' }
+          Write-Host "::warning::cl: $($clmsg -replace '%', '%25')"
+
           & "$env:GITHUB_WORKSPACE\.github\scripts\report-errors.ps1" $log 'driver build'
           exit $code
 

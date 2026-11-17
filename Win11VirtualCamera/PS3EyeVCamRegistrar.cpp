@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <string>
 
+#pragma comment(lib, "mf.lib")      // MFEnumDeviceSources (mfidl.h) lives in mf.dll
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mfuuid.lib")
 #pragma comment(lib, "mfreadwrite.lib")
