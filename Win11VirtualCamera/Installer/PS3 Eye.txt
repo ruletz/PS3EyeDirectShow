@@ -1,0 +1,22 @@
+PS3 Eye Windows Virtual Camera
+==============================
+
+This camera comes from PS3EyeVCamSource.dll (the Media Foundation source) and
+PS3EyeCaptureService (the service that owns the PS3 Eye over USB).
+
+Quick check after installing:
+
+  1. Open the Windows Camera app, or
+     https://webrtc.github.io/samples/src/content/devices/input-output/
+     and pick "PS3 Eye Windows Virtual Camera".
+  2. If the camera is missing:
+       "%ProgramFiles%\PS3 Eye\PS3EyeVCamRegistrar.exe" status
+  3. If the camera is listed but the picture is black:
+       sc query PS3EyeCaptureService
+     the service must be running, and the PS3 Eye must not be held by OBS or by
+     the DirectShow filter (it is a single-client USB device).
+  4. Install log: %ProgramData%\PS3 Eye\install.log
+
+Uninstall via Settings > Apps, or:
+
+  powershell -ExecutionPolicy Bypass -File "%ProgramFiles%\PS3 Eye\Install-PS3EyeNative.ps1" -Uninstall

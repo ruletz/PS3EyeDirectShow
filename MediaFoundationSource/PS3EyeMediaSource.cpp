@@ -9,6 +9,8 @@
 #include <mfidl.h>
 #include <ole2.h>
 
+#include <chrono>
+
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mfuuid.lib")
 #pragma comment(lib, "ole32.lib")
@@ -89,15 +91,22 @@ HRESULT PS3EyeMediaSource::Initialize() {
   if (FAILED(hr))
     return hr;
 
-  // Connect to shared memory (requires PS3EyeCaptureService to be running)
+  hr = m_sourceAttributes->SetString(MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
+                                     L"PS3 Eye Camera");
+  if (FAILED(hr))
+    return hr;
+
+  // Connect to shared memory (requires PS3EyeCaptureService to be running).
+  // The Frame Server instantiates this source while enumerating the camera, so
+  // a missing capture service must not fail activation: connect best-effort and
+  // let the capture thread keep retrying once streaming starts.
   if (!m_sharedMemClient.Connect()) {
     OutputDebugStringW(
-        L"PS3EyeMediaSource: Cannot connect to shared memory.\n");
-    OutputDebugStringW(
-        L"PS3EyeMediaSource: Make sure PS3EyeCaptureService.exe is running.\n");
-    return E_FAIL;
+        L"PS3EyeMediaSource: PS3EyeCaptureService is not running yet; "
+        L"frames will start once it is.\n");
+  } else {
+    OutputDebugStringW(L"PS3EyeMediaSource: Connected to shared memory\n");
   }
-  OutputDebugStringW(L"PS3EyeMediaSource: Connected to shared memory\n");
 
   // Create the stream
   hr = CreateStream();

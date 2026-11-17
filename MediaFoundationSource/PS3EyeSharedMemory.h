@@ -26,6 +26,11 @@ constexpr wchar_t PS3EYE_CLIENT_EVENT_NAME[] =
 constexpr wchar_t PS3EYE_CLIENT_SEMAPHORE_NAME[] =
     L"PS3EyeClientCount"; // Semaphore count = active clients
 
+// Signalled by the kernel minidriver while it has the camera open. A kernel
+// reader cannot bump clientCount (it maps the section read-only), so the
+// service learns about it through this event instead.
+constexpr wchar_t PS3EYE_KERNEL_READER_EVENT_NAME[] = L"PS3EyeKernelReader";
+
 // Header at the start of shared memory
 #pragma pack(push, 1)
 struct PS3EyeFrameHeader {
@@ -80,11 +85,15 @@ public:
   // Wait for clients to connect (blocks until at least one client)
   bool WaitForClients(DWORD timeoutMs = INFINITE);
 
+  // True while the kernel minidriver has the camera open
+  bool HasKernelReader() const;
+
 private:
   HANDLE m_fileMapping;
   HANDLE m_mutex;
   HANDLE m_newFrameEvent;
-  HANDLE m_clientEvent; // Signaled when clients connect/disconnect
+  HANDLE m_clientEvent;       // Signaled when clients connect/disconnect
+  HANDLE m_kernelReaderEvent; // Set by the kernel minidriver while attached
   void *m_sharedMemory;
   UINT64 m_frameNumber;
 };
