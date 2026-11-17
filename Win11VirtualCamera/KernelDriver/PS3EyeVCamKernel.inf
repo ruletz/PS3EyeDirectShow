@@ -37,9 +37,13 @@ Include=ks.inf
 Needs=KS.Registration
 CopyFiles=PS3Eye.CopyFiles
 
+; The reference string has to match the filter's ReferenceGuid, because that is
+; the reference ks.sys uses when it registers the category interfaces at device
+; start. Naming them here is what makes the device appear under its own name
+; instead of the generic "AvStream Media Device".
 [PS3Eye_Install.NT.Interfaces]
-AddInterface=%KSCATEGORY_VIDEO_CAMERA%,,PS3Eye.Interface
-AddInterface=%KSCATEGORY_CAPTURE%,,PS3Eye.Interface
+AddInterface=%KSCATEGORY_VIDEO_CAMERA%,%PS3EyeInterfaceRef%,PS3Eye.Interface
+AddInterface=%KSCATEGORY_CAPTURE%,%PS3EyeInterfaceRef%,PS3Eye.Interface
 
 [PS3Eye_Install.NT.Services]
 ; 0x00000002 = SPSVCINST_ASSOCSERVICE. The flag has to be the literal value:
@@ -69,5 +73,6 @@ ProviderName="PS3 Eye"
 DiskName="PS3 Eye Virtual Camera Installation Disk"
 DeviceDesc="PS3 Eye Camera"
 ServiceDesc="PS3 Eye Virtual Camera Driver"
+PS3EyeInterfaceRef="{7C1F0A53-9B2D-4E77-A3C8-51D9E0B4A6F1}"
 KSCATEGORY_VIDEO_CAMERA="{E5323777-F976-4F5B-9B55-B94699C46E44}"
 KSCATEGORY_CAPTURE="{65E8773D-8F56-11D0-A3B9-00A0C9223196}"

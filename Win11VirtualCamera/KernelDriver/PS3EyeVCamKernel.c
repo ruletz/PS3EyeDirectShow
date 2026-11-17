@@ -370,6 +370,27 @@ static const KS_DATARANGE_VIDEO g_VideoRange = {
     },
 };
 
+// A capture pin must publish allocator framing. Without it the client (Media
+// Foundation through the KS proxy, or DirectShow's KSProxy) cannot create the
+// buffers it renders into, and starting the stream fails before a single frame
+// is requested - which is what a browser reports as NotReadableError.
+//
+// The macro takes the memory type as a comma-separated GUID, so it is spelled
+// through a helper macro: arguments are split before they are expanded, which
+// keeps the commas out of the argument itself.
+#define PS3EYE_MEMORY_TYPE_KERNEL_NONPAGED                                    \
+    0x4a6d5fc4L, 0x7895, 0x11d1, {0xb0, 0x69, 0x00, 0xa0, 0xc9, 0x06, 0x28, 0x02}
+
+DECLARE_SIMPLE_FRAMING_EX(
+    g_PinAllocatorFraming,
+    PS3EYE_MEMORY_TYPE_KERNEL_NONPAGED,
+    KSALLOCATOR_REQUIREMENTF_SYSTEM_MEMORY |
+        KSALLOCATOR_REQUIREMENTF_PREFERENCES_ONLY,
+    2,
+    0,
+    PS3EYE_FRAME_SIZE,
+    PS3EYE_FRAME_SIZE);
+
 static const KSPIN_INTERFACE g_PinInterfaces[1] = {
     {STATIC_KSINTERFACESETID_Standard, KSINTERFACE_STANDARD_STREAMING, 0}};
 
@@ -747,14 +768,19 @@ static const KSPIN_DESCRIPTOR_EX g_PinDescriptors[1] = {
             .DataRangesCount = 1,
             .DataRanges = g_PinDataRanges,
             .DataFlow = KSPIN_DATAFLOW_OUT,
-            .Communication = KSPIN_COMMUNICATION_SINK,
+            // A capture pin is bidirectional in practice: the client opens it as
+            // the renderer side, and KSProxy refuses SINK-only pins on some
+            // capture paths.
+            .Communication = KSPIN_COMMUNICATION_BOTH,
             .Category = &kCategoryCapture,
             .Name = NULL,
         },
         .Flags = KSPIN_FLAG_PROCESS_IN_RUN_STATE_ONLY,
         .InstancesPossible = VCAM_MAX_PINS,
-        .InstancesNecessary = 0,
-        .AllocatorFraming = NULL,
+        // The filter is useless without its only pin, and saying so lets the
+        // graph builder know it must instantiate it.
+        .InstancesNecessary = 1,
+        .AllocatorFraming = &g_PinAllocatorFraming,
         .IntersectHandler = NULL,
     },
 };
