@@ -175,6 +175,25 @@ public static class PS3EyeRootDevice
 }
 '@
 
+# ------------------------------------------------------------- root rescan ---
+
+# Rescanning the root enumerator is what Device Manager's "Scan for hardware
+# changes" does; it is the only way to make PnP look at a node it has already
+# marked as started.
+$RescanSource = @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class PS3EyeRescan
+{
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    public static extern int CM_Locate_DevNode(out uint devInst, string deviceId, uint flags);
+
+    [DllImport("cfgmgr32.dll")]
+    public static extern int CM_Reenumerate_DevNode(uint devInst, uint flags);
+}
+'@
+
 # ------------------------------------------------------------------ steps ---
 
 function Install-Driver {
@@ -216,21 +235,87 @@ function Install-Driver {
         Write-Step $result 'ERROR'
         return
     }
-    Write-Step 'Device node created; waiting for Windows to bind the staged driver.'
+    Write-Step 'Device node created; binding the staged driver.'
 
-    # The node appears driverless and PnP picks the staged package up on its own;
-    # a second pnputil pass just nudges it in case it has not started yet.
-    $device = $null
-    for ($i = 0; $i -lt 20 -and -not $device; $i++) {
-        Start-Sleep -Milliseconds 500
-        $device = Get-PnpDevice -ErrorAction SilentlyContinue |
+    function Get-VcamDevice {
+        Get-PnpDevice -ErrorAction SilentlyContinue |
             Where-Object { $_.InstanceId -like ("{0}*" -f $HardwareId) } | Select-Object -First 1
     }
-    if ($device -and $device.Status -ne 'OK') {
-        & pnputil.exe /add-driver "$inf" /install | ForEach-Object { Write-Step $_ }
-        Start-Sleep -Seconds 2
-        $device = Get-PnpDevice -ErrorAction SilentlyContinue |
-            Where-Object { $_.InstanceId -like ("{0}*" -f $HardwareId) } | Select-Object -First 1
+
+    function Get-VcamService([string] $InstanceId) {
+        try {
+            [string] (Get-PnpDeviceProperty -InstanceId $InstanceId -KeyName DEVPKEY_Device_Service -ErrorAction Stop).Data
+        } catch {
+            ''
+        }
+    }
+
+    $device = $null
+    for ($i = 0; $i -lt 10 -and -not $device; $i++) {
+        Start-Sleep -Milliseconds 500
+        $device = Get-VcamDevice
+    }
+    if (-not $device) {
+        Write-Step 'The device node did not appear.' 'ERROR'
+        $script:ExitCode = 1
+        return
+    }
+
+    # A root node created through SetupAPI is enumerated, but nothing runs the
+    # install step for it: with no driver chosen Windows marks it started on the
+    # null driver with problem 0, so it looks healthy and pnputil has nothing to
+    # act on. Disabling and re-enabling makes PnP run driver selection against
+    # the staged package.
+    if (-not (Get-VcamService $device.InstanceId)) {
+        Write-Step 'No driver bound yet; cycling the device to trigger the install.'
+        try {
+            Disable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false -ErrorAction Stop
+        } catch {
+            Write-Step ("Disable-PnpDevice failed: {0}" -f $_.Exception.Message) 'WARN'
+        }
+        Start-Sleep -Seconds 1
+        try {
+            Enable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false -ErrorAction Stop
+        } catch {
+            Write-Step ("Enable-PnpDevice failed: {0}" -f $_.Exception.Message) 'WARN'
+        }
+    }
+
+    for ($i = 0; $i -lt 10; $i++) {
+        Start-Sleep -Milliseconds 500
+        $device = Get-VcamDevice
+        if ($device -and (Get-VcamService $device.InstanceId)) { break }
+    }
+
+    # Last resort: mark the node for reinstall and rescan the root enumerator.
+    if (-not (Get-VcamService $device.InstanceId)) {
+        Write-Step 'Still unbound; flagging the node for reinstall and rescanning the root.' 'WARN'
+        $enumKey = "HKLM:\SYSTEM\CurrentControlSet\Enum\{0}" -f $device.InstanceId
+        $flags = 0
+        try { $flags = [int] (Get-ItemProperty -Path $enumKey -Name ConfigFlags -ErrorAction Stop).ConfigFlags } catch { }
+        try {
+            Set-ItemProperty -Path $enumKey -Name ConfigFlags -Value ($flags -bor 0x20) -Type DWord -ErrorAction Stop
+        } catch {
+            Write-Step ("Could not set ConfigFlags: {0}" -f $_.Exception.Message) 'WARN'
+        }
+        if (-not ('PS3EyeRescan' -as [type])) {
+            Add-Type -TypeDefinition $RescanSource -Language CSharp
+        }
+        $dn = 0
+        if ([PS3EyeRescan]::CM_Locate_DevNode([ref]$dn, 'HTREE\ROOT\0', 0) -eq 0) {
+            $cr = [PS3EyeRescan]::CM_Reenumerate_DevNode($dn, 1)
+            Write-Step ("Root rescan returned {0}." -f $cr)
+        }
+        Start-Sleep -Seconds 3
+        $device = Get-VcamDevice
+    }
+
+    $service = if ($device) { Get-VcamService $device.InstanceId } else { '' }
+    if ($service) {
+        Write-Step ("Bound to {0} [{1}] via service {2}." -f $device.FriendlyName, $device.Status, $service) 'OK'
+    } else {
+        Write-Step 'The node exists but Windows bound no driver to it.' 'ERROR'
+        $script:ExitCode = 1
     }
 
     try {
