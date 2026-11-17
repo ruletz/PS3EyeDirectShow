@@ -722,7 +722,18 @@ static VOID VcamTimerDpc(PKDPC Dpc, PVOID DeferredContext, PVOID SystemArgument1
 // Filter / device descriptors
 //------------------------------------------------------------------------------
 
-static const GUID *g_FilterCategories[1] = {&kCategoryVideoCamera};
+// KSFILTER_DESCRIPTOR.Categories is a flat array of GUIDs (const GUID *), not
+// an array of GUID pointers. Declaring it as an array of pointers made ks.sys
+// read the first 16 bytes of the pointer table as a category GUID, so it
+// registered a single bogus interface and no KSCATEGORY_VIDEO_CAMERA or
+// KSCATEGORY_CAPTURE at all - the device was then invisible to Media Foundation
+// and DirectShow. Both categories are published, as real capture devices do:
+// VIDEO_CAMERA is what the camera stack and browsers enumerate, CAPTURE is what
+// DirectShow's video input enumerator looks for.
+static const GUID g_FilterCategories[2] = {
+    {0xe5323777, 0xf976, 0x4f5b, {0x9b, 0x55, 0xb9, 0x46, 0x99, 0xc4, 0x6e, 0x44}},
+    {0x65e8773d, 0x8f56, 0x11d0, {0xa3, 0xb9, 0x00, 0xa0, 0xc9, 0x22, 0x31, 0x96}},
+};
 
 static const KSPIN_DESCRIPTOR_EX g_PinDescriptors[1] = {
     {
@@ -759,7 +770,7 @@ static const KSFILTER_DESCRIPTOR g_FilterDescriptor = {
     .PinDescriptorsCount = 1,
     .PinDescriptorSize = sizeof(KSPIN_DESCRIPTOR_EX),
     .PinDescriptors = g_PinDescriptors,
-    .CategoriesCount = 1,
+    .CategoriesCount = 2,
     .Categories = g_FilterCategories,
     .NodeDescriptorsCount = 0,
     .NodeDescriptorSize = sizeof(KSNODE_DESCRIPTOR),
