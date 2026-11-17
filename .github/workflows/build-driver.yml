@@ -165,6 +165,23 @@ jobs:
           & "$env:GITHUB_WORKSPACE\.github\scripts\report-errors.ps1" $log 'capture service build' $code
           exit $code
 
+      # PnP identifies a driver package by its INF, and the DriverStore folder
+      # name is a hash of that INF. With a fixed DriverVer, a rebuilt .sys with
+      # a different hash still landed in the existing package, so
+      # UpdateDriverForPlugAndPlayDevices reported success while the previously
+      # installed binary kept running. Stamp a unique version per build.
+      - name: Stamp driver version
+        shell: pwsh
+        run: |
+          $inf = 'Win11VirtualCamera\KernelDriver\PS3EyeVCamKernel.inf'
+          $build = ([int]$env:GITHUB_RUN_NUMBER % 60000) + 1
+          $date = (Get-Date).ToString('MM/dd/yyyy')
+          $version = "$date,1.0.0.$build"
+          $text = Get-Content $inf -Raw
+          $text = [regex]::Replace($text, '(?m)^DriverVer=.*$', "DriverVer=$version")
+          Set-Content $inf $text -NoNewline
+          Write-Host "::notice::DriverVer=$version"
+
       - name: Make catalog
         shell: pwsh
         run: |
