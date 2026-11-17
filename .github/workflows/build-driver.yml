@@ -113,6 +113,21 @@ jobs:
 
       # The repository carries no libusb binaries, so build the import library
       # from the submodule and hand its directory to the capture service.
+      # A filter for the PS3 Eye's existing capture device: it adds the camera
+      # interfaces that Media Foundation enumerates and forwards every IRP. It
+      # is signed like the rest but needs no INF or catalog of its own.
+      - name: Build camera interface filter
+        shell: pwsh
+        run: |
+          $proj = 'Win11VirtualCamera\CamInterfaceFilter\PS3EyeCamInterface.vcxproj'
+          $log = "$env:RUNNER_TEMP\filter.log"
+          $out = & msbuild $proj /p:Configuration=Release /p:Platform=x64 `/n            /p:SolutionDir=$(Resolve-Path 'Win11VirtualCamera')\ /v:minimal /nologo 2>&1
+          $code = $LASTEXITCODE
+          $out | Set-Content $log
+          $out | Write-Host
+          & "$env:GITHUB_WORKSPACE\.github\scripts\report-errors.ps1" $log 'filter build' $code
+          exit $code
+
       - name: Build libusb
         shell: pwsh
         run: |
@@ -247,7 +262,8 @@ jobs:
           if (-not $signtool) { Write-Host '::error::signtool not found'; exit 1 }
 
           $pfx = "$out\PS3EyeTest.pfx"
-          foreach ($f in @("$out\PS3EyeVCamKernel.sys", "$out\PS3EyeVCamKernel.cat")) {
+          foreach ($f in @("$out\PS3EyeVCamKernel.sys", "$out\PS3EyeVCamKernel.cat",
+                          "$out\PS3EyeCamInterface.sys")) {
             Write-Host "::notice::signing $(Split-Path $f -Leaf)"
             $code = Invoke-Capped $signtool @('sign', '/v', '/fd', 'SHA256', '/f', $pfx, '/p', 'ps3eye', $f) 'sign'
             if ($code -ne 0) { Write-Host "::error::signtool sign failed on $f"; exit 1 }
@@ -297,6 +313,7 @@ jobs:
 
           $driverOut = 'Win11VirtualCamera\bin\x64\Release'
           foreach ($name in 'PS3EyeVCamKernel.sys','PS3EyeVCamKernel.cat','PS3EyeVCamKernel.inf',
+                            'PS3EyeCamInterface.sys',
                             'PS3EyeVCamSource.dll','PS3EyeVCamRegistrar.exe',
                             'PS3EyeTest.cer','PS3EyeTest.pfx') {
             $p = Join-Path $driverOut $name
