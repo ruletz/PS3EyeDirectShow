@@ -22,6 +22,14 @@
 // KsCreateFilterFactory. See README.md for building and signing; the driver
 // must be test-signed (or attestation/WHQL-signed) before Windows loads it.
 
+// ks.h declares every GUID with DEFINE_GUIDEX, which outside C++ expands to
+// "EXTERN_C const CDECL GUID name". The WDK only supplies a CDECL macro from
+// <winnt.h>, which kernel code never includes, so in C builds ks.h fails with
+// "expected '(' to follow 'CDECL'". Define it before the ks.h include.
+#if !defined(CDECL)
+#define CDECL __cdecl
+#endif
+
 #include <ntddk.h>
 #include <ks.h>
 #include <ksmedia.h>
