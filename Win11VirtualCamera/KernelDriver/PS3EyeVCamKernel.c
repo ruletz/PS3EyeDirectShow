@@ -22,10 +22,17 @@
 // KsCreateFilterFactory. See README.md for building and signing; the driver
 // must be test-signed (or attestation/WHQL-signed) before Windows loads it.
 
-// ks.h declares every GUID with DEFINE_GUIDEX, which outside C++ expands to
-// "EXTERN_C const CDECL GUID name". The WDK only supplies a CDECL macro from
-// <winnt.h>, which kernel code never includes, so in C builds ks.h fails with
-// "expected '(' to follow 'CDECL'". Define it before the ks.h include.
+// GUID declaration for a C build. Outside C++ ks.h falls back to its own
+// DEFINE_GUIDEX, "EXTERN_C const CDECL GUID name", which MSVC's C front end
+// rejects (calling convention on a variable) and which defines no GUID anyway;
+// the CDECL it needs only exists in user-mode winnt.h. user-mode guiddef.h
+// avoids both problems by initialising from the STATIC_ macro, and ks.h emits
+// one of those immediately before every DEFINE_GUIDSTRUCT, so do the same.
+// C++ builds never reach this code: there GUIDs are uuid-decorated structs.
+#if !defined(DEFINE_GUIDEX)
+#define DEFINE_GUIDEX(name) EXTERN_C const GUID name = { STATIC_##name }
+#endif
+
 #if !defined(CDECL)
 #define CDECL __cdecl
 #endif
