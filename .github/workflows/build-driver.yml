@@ -300,12 +300,16 @@ jobs:
                             'PS3EyeVCamSource.dll','PS3EyeVCamRegistrar.exe',
                             'PS3EyeTest.cer','PS3EyeTest.pfx') {
             $p = Join-Path $driverOut $name
-            if (Test-Path $p) { Copy-Item $p $dest -Force } else { Write-Host "missing: $name" }
+            if (Test-Path $p) { Copy-Item $p $dest -Force } else { Write-Host "::warning::artifact missing: $name" }
           }
           Copy-Item 'Win11VirtualCamera\KernelDriver\Install-PS3EyeDriver.ps1' $dest -Force
 
           $svc = 'MediaFoundationSource\bin\x64\Release\PS3EyeCaptureService.exe'
-          if (Test-Path $svc) { Copy-Item $svc $dest -Force } else { Write-Host "missing: PS3EyeCaptureService.exe" }
+          if (Test-Path $svc) { Copy-Item $svc $dest -Force } else { Write-Host '::warning::artifact missing: PS3EyeCaptureService.exe' }
+
+          # The service loads libusb at run time and looks for it beside the exe.
+          $dll = 'MediaFoundationSource/bin/x64/Release/libusb-1.0.dll'
+          if (Test-Path $dll) { Copy-Item $dll $dest -Force } else { Write-Host '::warning::artifact missing: libusb-1.0.dll' }
 
           Get-ChildItem $dest | Select-Object Name, Length | Format-Table | Out-String | Write-Host
 
