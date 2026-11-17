@@ -49,6 +49,9 @@
     <TargetExt>.sys</TargetExt>
     <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
     <EnableInf2cat>false</EnableInf2cat>
+    <!-- The WDK's InfVerif task cannot load its x86\InfVerif.dll on some
+         images; the INF is still validated by the Inf2Cat step of the build. -->
+    <EnableInfVerif>false</EnableInfVerif>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>

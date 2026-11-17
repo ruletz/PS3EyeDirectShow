@@ -71,7 +71,7 @@ jobs:
           $code = $LASTEXITCODE
           $out | Set-Content $log
           $out | Write-Host
-          & "$env:GITHUB_WORKSPACE\.github\scripts\report-errors.ps1" $log 'user-mode build'
+          & "$env:GITHUB_WORKSPACE\.github\scripts\report-errors.ps1" $log 'user-mode build' $code
           exit $code
 
       # The step that has never run: expect real errors the first time. Built
@@ -104,7 +104,7 @@ jobs:
           if ($clmsg.Length -gt 900) { $clmsg = $clmsg.Substring(0, 900) + '...' }
           Write-Host "::warning::cl: $($clmsg -replace '%', '%25')"
 
-          & "$env:GITHUB_WORKSPACE\.github\scripts\report-errors.ps1" $log 'driver build'
+          & "$env:GITHUB_WORKSPACE\.github\scripts\report-errors.ps1" $log 'driver build' $code
           exit $code
 
       - name: Build capture service
@@ -117,7 +117,7 @@ jobs:
           $code = $LASTEXITCODE
           $out | Set-Content $log
           $out | Write-Host
-          & "$env:GITHUB_WORKSPACE\.github\scripts\report-errors.ps1" $log 'capture service build'
+          & "$env:GITHUB_WORKSPACE\.github\scripts\report-errors.ps1" $log 'capture service build' $code
           exit $code
 
       - name: Make catalog

@@ -4,7 +4,10 @@
 # public API, so a failed cloud build can be diagnosed without a token.
 param(
     [Parameter(Mandatory = $true)][string] $LogPath,
-    [Parameter(Mandatory = $true)][string] $Label
+    [Parameter(Mandatory = $true)][string] $Label,
+    # Only a failed build has anything to explain; a passing one is quiet even
+    # if its log happens to contain the word "error" somewhere.
+    [int] $ExitCode = 0
 )
 
 $ErrorActionPreference = 'Continue'
@@ -24,6 +27,10 @@ $errors = @($lines | Where-Object { $_ -match ':\s*(fatal\s+)?error\b' })
 # a tool that returned non-zero): show anything mentioning an error, or the
 # last lines of the log, which is where msbuild summarises.
 if ($errors.Count -eq 0) {
+    if ($ExitCode -eq 0) {
+        exit 0
+    }
+
     $loose = @($lines | Where-Object { $_.Trim().Length -gt 0 } | Select-Object -Last 20)
     Write-Host "::warning::${Label}: no error lines in log; last lines follow"
 
