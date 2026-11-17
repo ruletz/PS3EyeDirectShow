@@ -75,10 +75,15 @@ typedef struct tagSIZE {
 } SIZE, *PSIZE;
 #endif
 
-// ks.h declares KsAcquireCachedMdl/KsReleaseCachedMdl with WINAPI, which the
-// kernel headers do not define (they use NTAPI).
+// ks.h declares KsAcquireCachedMdl/KsReleaseCachedMdl with WINAPI and ksmedia.h
+// types PRTAUDIOGETPOSITION with CALLBACK; the kernel headers use NTAPI and
+// define neither.
 #if !defined(WINAPI)
 #define WINAPI __stdcall
+#endif
+
+#if !defined(CALLBACK)
+#define CALLBACK __stdcall
 #endif
 
 #if !defined(MAX_PATH)
