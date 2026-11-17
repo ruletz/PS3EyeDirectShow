@@ -14,6 +14,13 @@ DriverVer=11/16/2026,1.0.0.0
 CatalogFile=PS3EyeVCamKernel.cat
 PnpLockdown=1
 
+; Every file named in a CopyFiles section must be listed here for Inf2Cat.
+[SourceDisksNames]
+1=%DiskName%,,,""
+
+[SourceDisksFiles]
+PS3EyeVCamKernel.sys=1,,
+
 [DestinationDirs]
 DefaultDestDir=12
 PS3Eye.CopyFiles=12
@@ -55,6 +62,7 @@ HKR,,Description,,%DeviceDesc%
 
 [Strings]
 ProviderName="PS3 Eye"
+DiskName="PS3 Eye Virtual Camera Installation Disk"
 DeviceDesc="PS3 Eye Camera"
 ServiceDesc="PS3 Eye Virtual Camera Driver"
 KSCATEGORY_VIDEO_CAMERA="{E5323777-F976-4F5B-9B55-B94699C46E44}"
