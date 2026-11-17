@@ -40,14 +40,13 @@
 
 #include <ntddk.h>
 
-// ks.h declares KsAcquireCachedMdl with a "BOOL *Cached" parameter and
-// ksmedia.h describes the DirectSound3D structs with FLOAT members, but only
-// user-mode windef.h defines those two types - the kernel headers never do, so
-// ks.h does not compile as C straight from ntddk.h. Declaring them here is
-// enough: this driver uses neither type.
-#if !defined(_WINDEF_)
-typedef LONG BOOL;
-typedef float FLOAT;
+// ks.h and ksmedia.h pick between user-mode and kernel declarations on
+// _NTDDK_; without it they fall into the user-mode branches and ask for DWORD,
+// BYTE, MAX_PATH, BOOL, FLOAT and the wtypes.h block, none of which a kernel
+// build has. The WDK does not define it for us, so set it before the KS
+// headers, which is what those "#if defined(_NTDDK_)" sections expect.
+#if !defined(_NTDDK_)
+#define _NTDDK_
 #endif
 
 #include <ks.h>
