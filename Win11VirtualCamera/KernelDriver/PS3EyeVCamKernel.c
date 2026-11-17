@@ -68,6 +68,16 @@ typedef struct tagRECT {
     LONG right;
     LONG bottom;
 } RECT, *PRECT;
+typedef struct tagSIZE {
+    LONG cx;
+    LONG cy;
+} SIZE, *PSIZE;
+#endif
+
+// ks.h declares KsAcquireCachedMdl/KsReleaseCachedMdl with WINAPI, which the
+// kernel headers do not define (they use NTAPI).
+#if !defined(WINAPI)
+#define WINAPI __stdcall
 #endif
 
 #if !defined(MAX_PATH)
