@@ -49,6 +49,10 @@
     <TargetExt>.sys</TargetExt>
     <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
     <EnableInf2cat>false</EnableInf2cat>
+    <!-- Signing is done by the build script's signtool step, which passes /fd;
+         the WDK's in-project test sign fails without it. -->
+    <EnableTestSign>false</EnableTestSign>
+    <TestSign>false</TestSign>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
