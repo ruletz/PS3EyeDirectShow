@@ -93,7 +93,7 @@
       <AdditionalLibraryDirectories>$(LibusbLibraryDir);$(ProjectDir)..\libusb\VS2022\MS64\dll;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /Y /D "$(ProjectDir)..\libusb\VS2022\MS64\dll\libusb-1.0.dll" "$(OutDir)"</Command>
+      <Command>xcopy /Y /D "$(LibusbLibraryDir)\libusb-1.0.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
