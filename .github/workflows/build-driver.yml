@@ -165,7 +165,7 @@ jobs:
           $code = $LASTEXITCODE
           $log | Write-Host
           $bad = @($log | Where-Object { $_ -match 'Error|error|missing|not found' } |
-            Where-Object { $_ -notmatch '^\s*Inf2Cat: (Errors|Warnings)' })
+            Where-Object { $_ -notmatch 'Inf2Cat: (\S+: )?(Errors|Warnings)' })
           foreach ($b in ($bad | Select-Object -First 8)) { Write-Host "::error::Inf2Cat: $b" }
           exit $code
 
@@ -281,8 +281,12 @@ jobs:
             Write-Host '::notice::signature is valid; chain ends in the untrusted test certificate'
             exit 0
           }
-          Write-Host '::error::signtool verify /pa failed'
-          exit $p.ExitCode
+          foreach ($line in ($text -split "`n" |
+              Where-Object { $_ -match 'SignTool|Error|Failed|Signature|trusted|Hash' } |
+              Select-Object -First 6)) {
+            Write-Host "::error::verify: $($line.Trim())"
+          }
+          exit 1
 
       - name: Collect artifacts
         shell: pwsh
