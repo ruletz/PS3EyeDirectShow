@@ -62,6 +62,7 @@ typedef ULONG DWORD;
 typedef USHORT WORD;
 typedef UCHAR BYTE;
 typedef ULONGLONG DWORDLONG;
+typedef unsigned int UINT;
 typedef struct tagRECT {
     LONG left;
     LONG top;
@@ -165,7 +166,7 @@ typedef struct _VCAM_PIN_SLOT {
     PKSPIN Pin;                    // NULL while the slot is free
     volatile LONG64 LastFrameNumber;
     BOOLEAN Running;
-} VCAM_PIN_SLOT;
+} VCAM_PIN_SLOT, *PVCAM_PIN_SLOT;
 
 typedef struct _VCAM_STATE {
     KSPIN_LOCK Lock;
@@ -175,7 +176,7 @@ typedef struct _VCAM_STATE {
     KTIMER Timer;
     KDPC TimerDpc;
     HANDLE SectionHandle;
-    HANDLE ReaderEvent;
+    PKEVENT ReaderEvent;           // referenced object, not a handle
     PVOID MappedBase;
     SIZE_T MappedSize;
     ULONG DataOffset;
@@ -192,8 +193,8 @@ static VCAM_STATE g_Vcam;
 static VOID VcamDisconnect(VOID) {
     if (g_Vcam.ReaderEvent != NULL) {
         // Tell the service the last reader is gone so it can park the camera.
-        ZwResetEvent(g_Vcam.ReaderEvent, NULL);
-        ZwClose(g_Vcam.ReaderEvent);
+        KeResetEvent(g_Vcam.ReaderEvent);
+        ObDereferenceObject(g_Vcam.ReaderEvent);
         g_Vcam.ReaderEvent = NULL;
     }
     if (g_Vcam.MappedBase != NULL) {
@@ -210,13 +211,18 @@ static VOID VcamDisconnect(VOID) {
 // PASSIVE_LEVEL. Opens the "reader attached" event if the service has created
 // it yet, and (re)signals it. Safe to call repeatedly: the service may start
 // after the first pin is already open, and the RUN transition retries.
+//
+// The handle is resolved to the event object and closed straight away: the
+// kernel has KeSetEvent/KeResetEvent but no ZwSetEvent/ZwResetEvent.
 static VOID VcamEnsureReaderEvent(VOID) {
     UNICODE_STRING eventName;
     OBJECT_ATTRIBUTES attributes;
     NTSTATUS status;
+    HANDLE handle = NULL;
+    PVOID eventObject = NULL;
 
     if (g_Vcam.ReaderEvent != NULL) {
-        ZwSetEvent(g_Vcam.ReaderEvent, NULL);
+        KeSetEvent(g_Vcam.ReaderEvent, IO_NO_INCREMENT, FALSE);
         return;
     }
 
@@ -225,12 +231,21 @@ static VOID VcamEnsureReaderEvent(VOID) {
                                OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL,
                                NULL);
 
-    status = ZwOpenEvent(&g_Vcam.ReaderEvent, EVENT_MODIFY_STATE, &attributes);
+    status = ZwOpenEvent(&handle, EVENT_MODIFY_STATE, &attributes);
     if (!NT_SUCCESS(status)) {
-        g_Vcam.ReaderEvent = NULL;
         return;
     }
-    ZwSetEvent(g_Vcam.ReaderEvent, NULL);
+
+    status = ObReferenceObjectByHandle(handle, EVENT_MODIFY_STATE,
+                                       *ExEventObjectType, KernelMode,
+                                       &eventObject, NULL);
+    ZwClose(handle);
+    if (!NT_SUCCESS(status)) {
+        return;
+    }
+
+    g_Vcam.ReaderEvent = (PKEVENT)eventObject;
+    KeSetEvent(g_Vcam.ReaderEvent, IO_NO_INCREMENT, FALSE);
 }
 
 static NTSTATUS VcamConnect(VOID) {
