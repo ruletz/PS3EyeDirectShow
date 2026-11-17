@@ -198,6 +198,7 @@ jobs:
           # New-SelfSignedCertificate stalls on this image, so make the
           # certificate with the managed API and keep it as a PFX instead.
           Write-Host '::notice::creating test certificate'
+          try {
           $rsa = [System.Security.Cryptography.RSA]::Create(2048)
           $req = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
             'CN=PS3EyeTest', $rsa,
@@ -215,6 +216,11 @@ jobs:
           $notBefore = (Get-Date).AddDays(-1)
           $cert = $req.CreateSelfSigned($notBefore, (Get-Date).AddYears(2))
           Write-Host "::notice::cert thumbprint: $($cert.Thumbprint)"
+          } catch {
+            Write-Host "::error::certificate creation failed: $($_.Exception.Message)"
+            Write-Host $_.ScriptStackTrace
+            exit 1
+          }
 
           $pfx = "$out\PS3EyeTest.pfx"
           [IO.File]::WriteAllBytes($pfx, $cert.Export('Pfx', 'ps3eye'))
