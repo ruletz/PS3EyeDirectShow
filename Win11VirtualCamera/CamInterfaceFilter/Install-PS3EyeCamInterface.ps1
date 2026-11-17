@@ -84,17 +84,30 @@ function Set-FilterList([string] $Key, [string[]] $Filters) {
     }
 }
 
+function Get-CameraInstanceId {
+    # The device *id* is not an instance id: only the instance carries the
+    # trailing suffix, and only that form works with pnputil.
+    $device = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
+        Where-Object { $_.InstanceId -like ("{0}*" -f $CameraInstance) } |
+        Select-Object -First 1
+    if (-not $device) { return $null }
+    return $device.InstanceId
+}
+
 function Restart-Camera {
     # Windows only loads a filter when the device stack is rebuilt.
-    $device = Get-PnpDevice -InstanceId $CameraInstance -ErrorAction SilentlyContinue
-    if (-not $device) {
+    $instance = Get-CameraInstanceId
+    if (-not $instance) {
         Write-Step 'The camera is not plugged in; the filter loads the next time it is.' 'WARN'
-        return
+        return $false
     }
-    & pnputil.exe /restart-device "$CameraInstance" 2>&1 | ForEach-Object { Write-Step ([string]$_) }
+    Write-Step ("Restarting {0}..." -f $instance)
+    & pnputil.exe /restart-device "$instance" 2>&1 | ForEach-Object { Write-Step ([string]$_) }
     if ($LASTEXITCODE -ne 0) {
         Write-Step 'pnputil could not restart the device; unplug and replug the camera.' 'WARN'
+        return $false
     }
+    return $true
 }
 
 function Test-CameraInterface {
@@ -144,7 +157,11 @@ if (-not (Test-IsAdmin)) {
 try {
     $key = Get-CameraKey
     if (-not $key) {
-        Write-Step "The camera device ($CameraInstance) is not present. Plug it in and run this again." 'ERROR'
+        Write-Step "The camera device ($CameraInstance) has no registry key. Plug it in and run this again." 'ERROR'
+        exit 1
+    }
+    if (-not (Get-CameraInstanceId)) {
+        Write-Step "The camera device ($CameraInstance) is not plugged in." 'ERROR'
         exit 1
     }
 
