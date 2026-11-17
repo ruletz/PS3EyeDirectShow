@@ -1,20 +1,21 @@
 <#
 .SYNOPSIS
-    Installs the PS3 Eye AVStream camera driver (root-enumerated device).
+    Installs the PS3 Eye AVStream camera driver as a software device.
 
 .DESCRIPTION
     1. checks driver signature enforcement (test signing) and warns if the
        driver cannot load
     2. stages PS3EyeVCamKernel.sys/.inf with pnputil
-    3. creates the ROOT\PS3EyeVCam device node and binds the driver to it
-    4. verifies that the device exists
+    3. creates the camera device through the Software Device API, which makes
+       PnP install the staged driver the same way it would for real hardware
+    4. reports whether a driver (and therefore a service) actually got bound
 
     Nothing here reboots the machine. If test signing has to be turned on, the
     script prints the bcdedit command and stops: enabling it takes effect only
     after a reboot, and the reboot is yours to decide.
 
 .PARAMETER Uninstall
-    Removes the device node and the driver package.
+    Removes the device and the driver package.
 
 .PARAMETER InstallDir
     Folder holding PS3EyeVCamKernel.sys/.inf/.cat. Defaults to this script's
@@ -44,7 +45,10 @@ if ([string]::IsNullOrEmpty($InstallDir)) {
     $InstallDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 }
 
-$HardwareId = 'ROOT\PS3EyeVCam'
+# Bare hardware id: it has to match the models line in the INF, and a software
+# device is matched on exactly this string.
+$HardwareId = 'PS3EyeVCam'
+$InstanceId = 'PS3EyeVCam'
 $DeviceDesc = 'PS3 Eye Camera'
 $DriverName = 'PS3EyeVCamKernel'
 
@@ -91,148 +95,123 @@ function Get-DriverFiles {
     return $files
 }
 
-# ---------------------------------------------------- root device creation ---
+function Get-VcamDevices {
+    @(Get-PnpDevice -ErrorAction SilentlyContinue |
+        Where-Object { $_.InstanceId -like "*$InstanceId*" })
+}
 
-$RootDeviceSource = @'
+function Get-VcamService([string] $DeviceInstanceId) {
+    try {
+        [string] (Get-PnpDeviceProperty -InstanceId $DeviceInstanceId -KeyName DEVPKEY_Device_Service -ErrorAction Stop).Data
+    } catch {
+        ''
+    }
+}
+
+# ------------------------------------------------------- software device ----
+
+# A device node created with SetupDiCreateDeviceInfo is enumerated but nothing
+# runs the install for it: Windows leaves it on the null driver with problem 0,
+# so pnputil, newdev and a rescan all consider it configured. The Software
+# Device API creates a genuinely new devnode, and PnP installs the staged
+# package for it exactly as it would for plugged-in hardware.
+$SwDeviceSource = @'
 using System;
 using System.Runtime.InteropServices;
+using System.Threading;
 
-public static class PS3EyeRootDevice
+public static class PS3EyeSwDevice
 {
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    public struct SP_DRVINFO_DATA
-    {
-        public int cbSize;
-        public int DriverType;
-        public IntPtr Reserved;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string Description;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string MfgName;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string ProviderName;
-        public long DriverDate;
-        public long DriverVersion;
-    }
-
     [StructLayout(LayoutKind.Sequential)]
-    public struct SP_DEVINFO_DATA
+    private struct SW_DEVICE_CREATE_INFO
     {
         public int cbSize;
-        public Guid ClassGuid;
-        public int DevInst;
-        public IntPtr Reserved;
+        public IntPtr pszInstanceId;
+        public IntPtr pszzHardwareIds;
+        public IntPtr pszzCompatibleIds;
+        public IntPtr pContainerId;
+        public int CapabilityFlags;
+        public IntPtr pszDeviceDescription;
+        public IntPtr pszDeviceLocation;
+        public IntPtr pSecurityDescriptor;
     }
 
-    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern IntPtr SetupDiCreateDeviceInfoList(ref Guid classGuid, IntPtr hwndParent);
+    private delegate void CreateCallback(IntPtr swDevice, int createResult, IntPtr instanceId, IntPtr context);
 
-    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern bool SetupDiCreateDeviceInfo(IntPtr deviceInfoSet, string deviceName,
-        ref Guid classGuid, string deviceDescription, IntPtr hwndParent, int creationFlags,
-        ref SP_DEVINFO_DATA deviceInfoData);
+    [DllImport("swdevice.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    private static extern int SwDeviceCreate(string enumerator, string parentDeviceInstance,
+        ref SW_DEVICE_CREATE_INFO createInfo, int propertyCount, IntPtr properties,
+        CreateCallback callback, IntPtr context, out IntPtr swDevice);
 
-    [DllImport("setupapi.dll", SetLastError = true)]
-    private static extern bool SetupDiSetDeviceRegistryProperty(IntPtr deviceInfoSet,
-        ref SP_DEVINFO_DATA deviceInfoData, int property, byte[] propertyBuffer, int propertyBufferSize);
+    [DllImport("swdevice.dll")]
+    private static extern int SwDeviceSetLifetime(IntPtr swDevice, int lifetime);
 
-    [DllImport("setupapi.dll", SetLastError = true)]
-    private static extern bool SetupDiCallClassInstaller(int installFunction, IntPtr deviceInfoSet,
-        ref SP_DEVINFO_DATA deviceInfoData);
+    [DllImport("swdevice.dll")]
+    private static extern void SwDeviceClose(IntPtr swDevice);
 
-    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern bool SetupDiBuildDriverInfoList(IntPtr deviceInfoSet,
-        ref SP_DEVINFO_DATA deviceInfoData, int driverType);
+    private const int Removable = 0x00000001;
+    private const int SilentInstall = 0x00000002;
+    private const int DriverRequired = 0x00000004;
+    private const int LifetimeParentPresent = 0x00000001;
 
-    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern bool SetupDiEnumDriverInfo(IntPtr deviceInfoSet, ref SP_DEVINFO_DATA deviceInfoData,
-        int driverType, int memberIndex, ref SP_DRVINFO_DATA driverInfoData);
-
-    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern bool SetupDiSetSelectedDriver(IntPtr deviceInfoSet, ref SP_DEVINFO_DATA deviceInfoData,
-        ref SP_DRVINFO_DATA driverInfoData);
-
-    [DllImport("setupapi.dll", SetLastError = true)]
-    private static extern bool SetupDiDestroyDeviceInfoList(IntPtr deviceInfoSet);
-
-    private const int DIF_REGISTERDEVICE = 0x00000019;
-    private const int DIF_INSTALLDEVICE = 0x00000002;
-    private const int SPDIT_COMPATDRIVER = 0x00000002;
-    private const int SPDRP_HARDWAREID = 0x00000001;
-    private const int DICD_GENERATE_ID = 0x00000001;
-
-
-    public static string Create(string hardwareId, string deviceDescription, string infPath)
+    private static IntPtr MultiSz(string value)
     {
-        Guid mediaClass = new Guid("4d36e96c-e325-11ce-bfc1-08002be10318");
-        IntPtr set = SetupDiCreateDeviceInfoList(ref mediaClass, IntPtr.Zero);
-        if (set == new IntPtr(-1))
-            return "SetupDiCreateDeviceInfoList failed (" + Marshal.GetLastWin32Error() + ")";
+        return Marshal.StringToHGlobalUni(value + "\0\0");
+    }
+
+    public static string Create(string enumerator, string instanceName, string hardwareId,
+        string description, out string deviceInstanceId)
+    {
+        deviceInstanceId = "";
+        IntPtr instance = Marshal.StringToHGlobalUni(instanceName);
+        IntPtr hardware = MultiSz(hardwareId);
+        IntPtr compatible = MultiSz(hardwareId);
+        IntPtr desc = Marshal.StringToHGlobalUni(description);
+        IntPtr device = IntPtr.Zero;
+        ManualResetEvent finished = new ManualResetEvent(false);
+        string reported = "";
+
+        CreateCallback callback = delegate(IntPtr handle, int result, IntPtr id, IntPtr context)
+        {
+            if (result == 0 && id != IntPtr.Zero) reported = Marshal.PtrToStringUni(id);
+            finished.Set();
+        };
 
         try
         {
-            SP_DEVINFO_DATA info = new SP_DEVINFO_DATA();
-            info.cbSize = Marshal.SizeOf(typeof(SP_DEVINFO_DATA));
+            SW_DEVICE_CREATE_INFO info = new SW_DEVICE_CREATE_INFO();
+            info.cbSize = Marshal.SizeOf(typeof(SW_DEVICE_CREATE_INFO));
+            info.pszInstanceId = instance;
+            info.pszzHardwareIds = hardware;
+            info.pszzCompatibleIds = compatible;
+            info.CapabilityFlags = Removable | SilentInstall | DriverRequired;
+            info.pszDeviceDescription = desc;
 
-            // DICD_GENERATE_ID takes the device id without the enumerator prefix;
-            // handing it the full instance path fails with 0xE0000205. The node
-            // ends up as ROOT\PS3EyeVCam\0000 with ROOT\PS3EyeVCam as its
-            // hardware id, which is what the INF matches on.
-            string instanceName = hardwareId.Substring(hardwareId.LastIndexOf('\\') + 1);
-            if (!SetupDiCreateDeviceInfo(set, instanceName, ref mediaClass, deviceDescription,
-                    IntPtr.Zero, DICD_GENERATE_ID, ref info))
-                return "SetupDiCreateDeviceInfo failed (" + Marshal.GetLastWin32Error() + ")";
+            int hr = SwDeviceCreate(enumerator, "HTREE\\ROOT\\0", ref info, 0, IntPtr.Zero,
+                callback, IntPtr.Zero, out device);
+            if (hr < 0)
+                return "SwDeviceCreate failed (0x" + hr.ToString("X8") + ")";
+            if (!finished.WaitOne(30000))
+                return "SwDeviceCreate did not report the device within 30 seconds";
+            GC.KeepAlive(callback);
+            if (device == IntPtr.Zero)
+                return "SwDeviceCreate returned no handle";
 
-            string multiSz = hardwareId + "\0\0";
-            byte[] buffer = System.Text.Encoding.Unicode.GetBytes(multiSz);
-            if (!SetupDiSetDeviceRegistryProperty(set, ref info, SPDRP_HARDWAREID, buffer, buffer.Length))
-                return "SetupDiSetDeviceRegistryProperty failed (" + Marshal.GetLastWin32Error() + ")";
-
-            if (!SetupDiCallClassInstaller(DIF_REGISTERDEVICE, set, ref info))
-                return "SetupDiCallClassInstaller failed (" + Marshal.GetLastWin32Error() + ")";
-
-            // Registering the node is not enough. Nothing runs driver selection
-            // for a device created this way, so it stays on the null driver with
-            // problem 0 and every install trigger (pnputil, newdev, a root
-            // rescan) decides it is already configured. Select the matching
-            // package from the driver store and install it explicitly.
-            if (!SetupDiBuildDriverInfoList(set, ref info, SPDIT_COMPATDRIVER))
-                return "SetupDiBuildDriverInfoList failed (" + Marshal.GetLastWin32Error() + ")";
-
-            SP_DRVINFO_DATA driver = new SP_DRVINFO_DATA();
-            driver.cbSize = Marshal.SizeOf(typeof(SP_DRVINFO_DATA));
-            if (!SetupDiEnumDriverInfo(set, ref info, SPDIT_COMPATDRIVER, 0, ref driver))
-                return "no matching driver package for the hardware id (" + Marshal.GetLastWin32Error() + ")";
-
-            if (!SetupDiSetSelectedDriver(set, ref info, ref driver))
-                return "SetupDiSetSelectedDriver failed (" + Marshal.GetLastWin32Error() + ")";
-
-            if (!SetupDiCallClassInstaller(DIF_INSTALLDEVICE, set, ref info))
-                return "DIF_INSTALLDEVICE failed (" + Marshal.GetLastWin32Error() + ")";
-
+            // Keep the device after this process exits; it is removed by
+            // uninstalling rather than by the handle going away.
+            SwDeviceSetLifetime(device, LifetimeParentPresent);
+            SwDeviceClose(device);
+            deviceInstanceId = reported;
             return "";
         }
         finally
         {
-            SetupDiDestroyDeviceInfoList(set);
+            Marshal.FreeHGlobal(instance);
+            Marshal.FreeHGlobal(hardware);
+            Marshal.FreeHGlobal(compatible);
+            Marshal.FreeHGlobal(desc);
         }
     }
-}
-'@
-
-# ------------------------------------------------------------- root rescan ---
-
-# Rescanning the root enumerator is what Device Manager's "Scan for hardware
-# changes" does; it is the only way to make PnP look at a node it has already
-# marked as started.
-$RescanSource = @'
-using System;
-using System.Runtime.InteropServices;
-
-public static class PS3EyeRescan
-{
-    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
-    public static extern int CM_Locate_DevNode(out uint devInst, string deviceId, uint flags);
-
-    [DllImport("cfgmgr32.dll")]
-    public static extern int CM_Reenumerate_DevNode(uint devInst, uint flags);
 }
 '@
 
@@ -266,128 +245,53 @@ function Install-Driver {
         Write-Step ("pnputil failed with exit code {0}." -f $LASTEXITCODE) 'WARN'
     }
 
-    if (-not ('PS3EyeRootDevice' -as [type])) {
-        Add-Type -TypeDefinition $RootDeviceSource -Language CSharp
+    if (-not ('PS3EyeSwDevice' -as [type])) {
+        Add-Type -TypeDefinition $SwDeviceSource -Language CSharp
     }
 
-    # Re-running over a device that is already bound would just pile up another
-    # generated instance, so stop here when there is a working one.
-    $bound = Get-PnpDevice -ErrorAction SilentlyContinue |
-        Where-Object { $_.InstanceId -like ("{0}*" -f $HardwareId) } | Select-Object -First 1
-    if ($bound) {
-        $boundService = ''
-        try {
-            $boundService = (Get-PnpDeviceProperty -InstanceId $bound.InstanceId -KeyName DEVPKEY_Device_Service -ErrorAction Stop).Data
-        } catch { }
-        if ($boundService) {
-            Write-Step ("Already installed: {0} [{1}] via service {2}." -f $bound.FriendlyName, $bound.Status, $boundService) 'OK'
+    $existing = @(Get-VcamDevices)
+    $device = $existing | Select-Object -First 1
+
+    if ($device) {
+        Write-Step ("Device already present: {0} ({1})" -f $device.InstanceId, $device.Status)
+    } else {
+        Write-Step ("Creating software device {0}..." -f $HardwareId)
+        $reported = ''
+        $result = [PS3EyeSwDevice]::Create('PS3EYE', $InstanceId, $HardwareId, $DeviceDesc, [ref]$reported)
+        if ($result -ne '') {
+            Write-Step $result 'ERROR'
             return
         }
+        Write-Step ("Windows enumerated {0}." -f $reported)
     }
 
-    Write-Step ("Creating device node {0}..." -f $HardwareId)
-    $result = [PS3EyeRootDevice]::Create($HardwareId, $DeviceDesc, $inf)
-
-    if ($result -ne '') {
-        Write-Step $result 'ERROR'
-        return
-    }
-    Write-Step 'Device node created; binding the staged driver.'
-
-    function Get-VcamDevice {
-        Get-PnpDevice -ErrorAction SilentlyContinue |
-            Where-Object { $_.InstanceId -like ("{0}*" -f $HardwareId) } | Select-Object -First 1
-    }
-
-    function Get-VcamService([string] $InstanceId) {
-        try {
-            [string] (Get-PnpDeviceProperty -InstanceId $InstanceId -KeyName DEVPKEY_Device_Service -ErrorAction Stop).Data
-        } catch {
-            ''
-        }
-    }
-
-    $device = $null
-    for ($i = 0; $i -lt 10 -and -not $device; $i++) {
+    # PnP installs the staged package for the new node; wait for the driver to
+    # register its service, which is the only proof the driver actually loaded.
+    $service = ''
+    for ($i = 0; $i -lt 40; $i++) {
         Start-Sleep -Milliseconds 500
-        $device = Get-VcamDevice
+        $device = (Get-VcamDevices) | Select-Object -First 1
+        if (-not $device) { continue }
+        $service = Get-VcamService $device.InstanceId
+        if ($service) { break }
     }
+
     if (-not $device) {
-        Write-Step 'The device node did not appear.' 'ERROR'
-        $script:ExitCode = 1
+        Write-Step 'The device does not exist after creation.' 'ERROR'
         return
     }
 
-    # A root node created through SetupAPI is enumerated, but nothing runs the
-    # install step for it: with no driver chosen Windows marks it started on the
-    # null driver with problem 0, so it looks healthy and pnputil has nothing to
-    # act on. Disabling and re-enabling makes PnP run driver selection against
-    # the staged package.
-    if (-not (Get-VcamService $device.InstanceId)) {
-        Write-Step 'No driver bound yet; cycling the device to trigger the install.'
-        try {
-            Disable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false -ErrorAction Stop
-        } catch {
-            Write-Step ("Disable-PnpDevice failed: {0}" -f $_.Exception.Message) 'WARN'
-        }
-        Start-Sleep -Seconds 1
-        try {
-            Enable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false -ErrorAction Stop
-        } catch {
-            Write-Step ("Enable-PnpDevice failed: {0}" -f $_.Exception.Message) 'WARN'
-        }
-    }
-
-    for ($i = 0; $i -lt 10; $i++) {
-        Start-Sleep -Milliseconds 500
-        $device = Get-VcamDevice
-        if ($device -and (Get-VcamService $device.InstanceId)) { break }
-    }
-
-    # Last resort: mark the node for reinstall and rescan the root enumerator.
-    if (-not (Get-VcamService $device.InstanceId)) {
-        Write-Step 'Still unbound; flagging the node for reinstall and rescanning the root.' 'WARN'
-        $enumKey = "HKLM:\SYSTEM\CurrentControlSet\Enum\{0}" -f $device.InstanceId
-        $flags = 0
-        try { $flags = [int] (Get-ItemProperty -Path $enumKey -Name ConfigFlags -ErrorAction Stop).ConfigFlags } catch { }
-        try {
-            Set-ItemProperty -Path $enumKey -Name ConfigFlags -Value ($flags -bor 0x20) -Type DWord -ErrorAction Stop
-        } catch {
-            Write-Step ("Could not set ConfigFlags: {0}" -f $_.Exception.Message) 'WARN'
-        }
-        if (-not ('PS3EyeRescan' -as [type])) {
-            Add-Type -TypeDefinition $RescanSource -Language CSharp
-        }
-        $dn = 0
-        if ([PS3EyeRescan]::CM_Locate_DevNode([ref]$dn, 'HTREE\ROOT\0', 0) -eq 0) {
-            $cr = [PS3EyeRescan]::CM_Reenumerate_DevNode($dn, 1)
-            Write-Step ("Root rescan returned {0}." -f $cr)
-        }
-        Start-Sleep -Seconds 3
-        $device = Get-VcamDevice
-    }
-
-    $service = if ($device) { Get-VcamService $device.InstanceId } else { '' }
     if ($service) {
-        Write-Step ("Bound to {0} [{1}] via service {2}." -f $device.FriendlyName, $device.Status, $service) 'OK'
+        Write-Step ("Bound: {0} [{1}] via service {2}." -f $device.FriendlyName, $device.Status, $service) 'OK'
     } else {
-        Write-Step 'The node exists but Windows bound no driver to it.' 'ERROR'
-        $script:ExitCode = 1
-    }
-
-    try {
-        if ($device) {
-            Write-Step ("Present: {0} [{1}] ({2})" -f $device.FriendlyName, $device.Status, $device.InstanceId) 'OK'
-        } else {
-            Write-Step 'The device node is registered but not present yet; a reboot finishes the binding.' 'WARN'
-        }
-    } catch {
-        Write-Step ("Could not query the device: {0}" -f $_.Exception.Message) 'WARN'
+        Write-Step ("Device {0} is present but no driver is bound to it [{1}]." -f $device.InstanceId, $device.Status) 'ERROR'
+        Write-Step 'Windows found no matching driver package. Check the hardware id in the INF models line matches this string exactly.' 'WARN'
+        return
     }
 
     Write-Step ''
-    Write-Step 'Next: make sure PS3EyeCaptureService is running (it feeds the driver):' 'OK'
-    Write-Step '    "%ProgramFiles%\PS3 Eye\PS3EyeVCamRegistrar.exe" status'
+    Write-Step 'Next: the capture service feeds the driver:' 'OK'
+    Write-Step '    PS3EyeCaptureService.exe --install'
     Write-Step 'Then open any camera app and pick "PS3 Eye Camera".' 'OK'
 }
 
@@ -408,11 +312,8 @@ function Get-PublishedDrivers {
 
 function Uninstall-Driver {
     Write-Step ("Removing device {0}..." -f $HardwareId)
-    # The instance id carries a generated suffix, so look it up rather than guess.
-    $instances = @(Get-PnpDevice -ErrorAction SilentlyContinue |
-        Where-Object { $_.InstanceId -like ("{0}*" -f $HardwareId) } |
-        Select-Object -ExpandProperty InstanceId)
-    if (-not $instances) { Write-Step 'No PS3 Eye device node present.' 'WARN' }
+    $instances = @(Get-VcamDevices | Select-Object -ExpandProperty InstanceId)
+    if (-not $instances) { Write-Step 'No PS3 Eye device present.' 'WARN' }
     foreach ($id in $instances) {
         & pnputil.exe /remove-device "$id" | ForEach-Object { Write-Step $_ }
     }

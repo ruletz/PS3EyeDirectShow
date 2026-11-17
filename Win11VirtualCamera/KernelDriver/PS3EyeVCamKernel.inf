@@ -1,8 +1,9 @@
 ; PS3EyeVCamKernel.inf
-; Root-enumerated AVStream camera for the PS3 Eye.
+; AVStream camera for the PS3 Eye, exposed as a software device.
 ;
-; The device node is created with the installer (no physical hardware), and the
-; driver registers itself under KSCATEGORY_VIDEO_CAMERA, so Windows treats it as
+; The installer creates the device through the Software Device API, so PnP
+; installs this package the same way it would for plugged-in hardware, and the
+; driver registers itself under KSCATEGORY_VIDEO_CAMERA so Windows treats it as
 ; an ordinary webcam.
 
 [Version]
@@ -29,7 +30,7 @@ PS3Eye.CopyFiles=12
 %ProviderName%=PS3Eye,NTamd64
 
 [PS3Eye.NTamd64]
-%DeviceDesc%=PS3Eye_Install, ROOT\PS3EyeVCam
+%DeviceDesc%=PS3Eye_Install, PS3EyeVCam
 
 [PS3Eye_Install.NT]
 Include=ks.inf
