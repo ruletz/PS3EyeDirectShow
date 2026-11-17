@@ -210,14 +210,15 @@ static VCAM_STATE g_Vcam;
 // client actually got. Values are written at PASSIVE_LEVEL only.
 //------------------------------------------------------------------------------
 
-#define VCAM_DIAG_COUNT 15
+#define VCAM_DIAG_COUNT 16
 
 static const WCHAR *const g_DiagNames[VCAM_DIAG_COUNT] = {
     L"DiagPinCreate",     L"DiagPinCreateFail", L"DiagSetFormat",
     L"DiagSetFormatFail", L"DiagRun",           L"DiagProcess",
     L"DiagSubFormat",     L"DiagFormatSize",    L"DiagLoaded",
-    L"DiagOpen",          L"DiagIoctl",         L"DiagWantSpec",
-    L"DiagWantSize",      L"DiagWantWidth",     L"DiagWantHeight"};
+    L"DiagOpen",          L"DiagIntersect",     L"DiagWantSpec",
+    L"DiagWantSize",      L"DiagWantWidth",     L"DiagWantHeight",
+    L"DiagIntersectFail"};
 
 static HANDLE g_DiagKey = NULL;
 static LONG g_Diag[VCAM_DIAG_COUNT];
@@ -252,81 +253,12 @@ static NTSTATUS VcamDeviceCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
     return g_OriginalCreate(DeviceObject, Irp);
 }
 
-// One value per KS call, named after the call and holding the status the driver
-// returned. Reading the key back after a failed attempt shows the exact
-// sequence of property queries and which one was refused.
-static VOID VcamDiagRecord(PCWSTR Prefix, ULONG First, ULONG Second,
-                           NTSTATUS Status) {
-    static const WCHAR hex[] = L"0123456789ABCDEF";
-    WCHAR name[24];
-    UNICODE_STRING valueName;
-    ULONG value = (ULONG)Status;
-    PWCHAR cursor = name;
-    int shift;
-
-    if (g_DiagKey == NULL || KeGetCurrentIrql() != PASSIVE_LEVEL) {
-        return;
-    }
-
-    *cursor++ = Prefix[0];
-    *cursor++ = Prefix[1];
-    for (shift = 28; shift >= 0; shift -= 4) {
-        *cursor++ = hex[(First >> shift) & 0xF];
-    }
-    if (Second != 0) {
-        *cursor++ = L'_';
-        for (shift = 28; shift >= 0; shift -= 4) {
-            *cursor++ = hex[(Second >> shift) & 0xF];
-        }
-    }
-    UNREFERENCED_PARAMETER(cursor);
-
-    RtlInitUnicodeString(&valueName, name);
-    // name is not NUL terminated above; give RtlInitUnicodeString the length.
-    valueName.Length = (USHORT)((cursor - name) * sizeof(WCHAR));
-    valueName.MaximumLength = valueName.Length;
-    ZwSetValueKey(g_DiagKey, &valueName, 0, REG_DWORD, &value, sizeof(value));
-}
-
-static DRIVER_DISPATCH *g_OriginalIoctl = NULL;
-
-static DRIVER_DISPATCH VcamDeviceIoctl;
-
-static NTSTATUS VcamDeviceIoctl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
-    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
-    ULONG code = stack->Parameters.DeviceIoControl.IoControlCode;
-    ULONG propertySet = 0;
-    ULONG propertyId = 0;
-    NTSTATUS status;
-
-    if (code == IOCTL_KS_PROPERTY) {
-        PVOID buffer = stack->Parameters.DeviceIoControl.Type3InputBuffer;
-        ULONG length = stack->Parameters.DeviceIoControl.InputBufferLength;
-
-        if (buffer != NULL && length >= sizeof(KSPROPERTY)) {
-            __try {
-                ProbeForRead(buffer, sizeof(KSPROPERTY), sizeof(ULONG));
-                propertySet = ((const KSPROPERTY *)buffer)->Set.Data1;
-                propertyId = ((const KSPROPERTY *)buffer)->Id;
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                propertySet = 0;
-                propertyId = 0;
-            }
-        }
-    }
-
-    if (g_OriginalIoctl == NULL) {
-        return STATUS_INVALID_DEVICE_REQUEST;
-    }
-    status = g_OriginalIoctl(DeviceObject, Irp);
-
-    VcamDiagBump(10);
-    VcamDiagRecord(L"Io", code, 0, status);
-    if (code == IOCTL_KS_PROPERTY) {
-        VcamDiagRecord(L"Pr", propertySet, propertyId, status);
-    }
-    return status;
-}
+// Per-call registry logging used to live here: it built a value name in a fixed
+// stack buffer and handed it to RtlInitUnicodeString, which scans for a NUL that
+// was never written. That unbounded stack read faulted (bugcheck 0x3B) while a
+// client was querying the device, so counters with literal names are all that is
+// left. Which KS calls a client makes can be seen with a kernel debugger
+// instead.
 
 //------------------------------------------------------------------------------
 // Shared memory access (PASSIVE_LEVEL only)
@@ -968,8 +900,11 @@ static NTSTATUS VcamPinIntersect(PVOID Context, PIRP Irp, PKSP_PIN Pin,
     UNREFERENCED_PARAMETER(Pin);
 
     if (DataRange == NULL || MatchingDataRange == NULL || DataSize == NULL) {
+        VcamDiagBump(15);
         return STATUS_INVALID_PARAMETER;
     }
+
+    VcamDiagBump(10);
 
     // Recorded so a refused match says what the client asked for.
     VcamDiagSet(11, DataRange->Specifier.Data1);
@@ -983,6 +918,7 @@ static NTSTATUS VcamPinIntersect(PVOID Context, PIRP Irp, PKSP_PIN Pin,
 
     if (!IsEqualGUID(&DataRange->MajorFormat, &kMajorTypeVideo) ||
         !IsEqualGUID(&DataRange->SubFormat, &kSubtypeRgb24)) {
+        VcamDiagBump(15);
         return STATUS_NO_MATCH;
     }
 
@@ -994,6 +930,7 @@ static NTSTATUS VcamPinIntersect(PVOID Context, PIRP Irp, PKSP_PIN Pin,
         second = FALSE;
         formatSize = sizeof(KSDATAFORMAT) + sizeof(KS_VIDEOINFOHEADER);
     } else {
+        VcamDiagBump(15);
         return STATUS_NO_MATCH;
     }
 
@@ -1003,9 +940,11 @@ static NTSTATUS VcamPinIntersect(PVOID Context, PIRP Irp, PKSP_PIN Pin,
         return STATUS_BUFFER_OVERFLOW;
     }
     if (Data == NULL) {
+        VcamDiagBump(15);
         return STATUS_INVALID_PARAMETER;
     }
     if (DataBufferSize < formatSize) {
+        VcamDiagBump(15);
         return STATUS_BUFFER_TOO_SMALL;
     }
 
@@ -1132,9 +1071,6 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
     // this device is counted, whether or not a pin ever gets created.
     g_OriginalCreate = DriverObject->MajorFunction[IRP_MJ_CREATE];
     DriverObject->MajorFunction[IRP_MJ_CREATE] = VcamDeviceCreate;
-
-    g_OriginalIoctl = DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL];
-    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = VcamDeviceIoctl;
 
     return status;
 }
