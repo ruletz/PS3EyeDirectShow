@@ -201,12 +201,13 @@ static VCAM_STATE g_Vcam;
 // client actually got. Values are written at PASSIVE_LEVEL only.
 //------------------------------------------------------------------------------
 
-#define VCAM_DIAG_COUNT 8
+#define VCAM_DIAG_COUNT 10
 
 static const WCHAR *const g_DiagNames[VCAM_DIAG_COUNT] = {
     L"DiagPinCreate",     L"DiagPinCreateFail", L"DiagSetFormat",
     L"DiagSetFormatFail", L"DiagRun",           L"DiagProcess",
-    L"DiagSubFormat",     L"DiagFormatSize"};
+    L"DiagSubFormat",     L"DiagFormatSize",    L"DiagLoaded",
+    L"DiagOpen"};
 
 static HANDLE g_DiagKey = NULL;
 static LONG g_Diag[VCAM_DIAG_COUNT];
@@ -227,6 +228,15 @@ static VOID VcamDiagBump(ULONG Index) {
         return;
     }
     VcamDiagSet(Index, (ULONG)InterlockedIncrement(&g_Diag[Index]));
+}
+
+static DRIVER_DISPATCH *g_OriginalCreate = NULL;
+
+static DRIVER_DISPATCH VcamDeviceCreate;
+
+static NTSTATUS VcamDeviceCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
+    VcamDiagBump(9);
+    return g_OriginalCreate(DeviceObject, Irp);
 }
 
 //------------------------------------------------------------------------------
@@ -908,8 +918,13 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
         InitializeObjectAttributes(&attributes, RegistryPath,
                                    OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL,
                                    NULL);
-        if (!NT_SUCCESS(ZwOpenKey(&g_DiagKey, KEY_SET_VALUE, &attributes))) {
+        if (!NT_SUCCESS(ZwOpenKey(&g_DiagKey, KEY_READ | KEY_SET_VALUE,
+                                  &attributes))) {
             g_DiagKey = NULL;
+        } else {
+            // Proves the counters below can be written at all, so a key with
+            // only this value means nothing ever opened the device.
+            VcamDiagSet(8, 1);
         }
     }
 
@@ -917,6 +932,13 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
     if (!NT_SUCCESS(status)) {
         DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
                    "PS3EyeVCam: KsInitializeDriver failed 0x%08X\n", status);
+        return status;
     }
+
+    // Chain the create dispatch AVStream installed so every attempted open of
+    // this device is counted, whether or not a pin ever gets created.
+    g_OriginalCreate = DriverObject->MajorFunction[IRP_MJ_CREATE];
+    DriverObject->MajorFunction[IRP_MJ_CREATE] = VcamDeviceCreate;
+
     return status;
 }
