@@ -210,13 +210,13 @@ static VCAM_STATE g_Vcam;
 // client actually got. Values are written at PASSIVE_LEVEL only.
 //------------------------------------------------------------------------------
 
-#define VCAM_DIAG_COUNT 10
+#define VCAM_DIAG_COUNT 11
 
 static const WCHAR *const g_DiagNames[VCAM_DIAG_COUNT] = {
     L"DiagPinCreate",     L"DiagPinCreateFail", L"DiagSetFormat",
     L"DiagSetFormatFail", L"DiagRun",           L"DiagProcess",
     L"DiagSubFormat",     L"DiagFormatSize",    L"DiagLoaded",
-    L"DiagOpen"};
+    L"DiagOpen",          L"DiagIoctl"};
 
 static HANDLE g_DiagKey = NULL;
 static LONG g_Diag[VCAM_DIAG_COUNT];
@@ -245,7 +245,86 @@ static DRIVER_DISPATCH VcamDeviceCreate;
 
 static NTSTATUS VcamDeviceCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
     VcamDiagBump(9);
+    if (g_OriginalCreate == NULL) {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
     return g_OriginalCreate(DeviceObject, Irp);
+}
+
+// One value per KS call, named after the call and holding the status the driver
+// returned. Reading the key back after a failed attempt shows the exact
+// sequence of property queries and which one was refused.
+static VOID VcamDiagRecord(PCWSTR Prefix, ULONG First, ULONG Second,
+                           NTSTATUS Status) {
+    static const WCHAR hex[] = L"0123456789ABCDEF";
+    WCHAR name[24];
+    UNICODE_STRING valueName;
+    ULONG value = (ULONG)Status;
+    PWCHAR cursor = name;
+    int shift;
+
+    if (g_DiagKey == NULL || KeGetCurrentIrql() != PASSIVE_LEVEL) {
+        return;
+    }
+
+    *cursor++ = Prefix[0];
+    *cursor++ = Prefix[1];
+    for (shift = 28; shift >= 0; shift -= 4) {
+        *cursor++ = hex[(First >> shift) & 0xF];
+    }
+    if (Second != 0) {
+        *cursor++ = L'_';
+        for (shift = 28; shift >= 0; shift -= 4) {
+            *cursor++ = hex[(Second >> shift) & 0xF];
+        }
+    }
+    UNREFERENCED_PARAMETER(cursor);
+
+    RtlInitUnicodeString(&valueName, name);
+    // name is not NUL terminated above; give RtlInitUnicodeString the length.
+    valueName.Length = (USHORT)((cursor - name) * sizeof(WCHAR));
+    valueName.MaximumLength = valueName.Length;
+    ZwSetValueKey(g_DiagKey, &valueName, 0, REG_DWORD, &value, sizeof(value));
+}
+
+static DRIVER_DISPATCH *g_OriginalIoctl = NULL;
+
+static DRIVER_DISPATCH VcamDeviceIoctl;
+
+static NTSTATUS VcamDeviceIoctl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
+    ULONG code = stack->Parameters.DeviceIoControl.IoControlCode;
+    ULONG propertySet = 0;
+    ULONG propertyId = 0;
+    NTSTATUS status;
+
+    if (code == IOCTL_KS_PROPERTY) {
+        PVOID buffer = stack->Parameters.DeviceIoControl.Type3InputBuffer;
+        ULONG length = stack->Parameters.DeviceIoControl.InputBufferLength;
+
+        if (buffer != NULL && length >= sizeof(KSPROPERTY)) {
+            __try {
+                ProbeForRead(buffer, sizeof(KSPROPERTY), sizeof(ULONG));
+                propertySet = ((const KSPROPERTY *)buffer)->Set.Data1;
+                propertyId = ((const KSPROPERTY *)buffer)->Id;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                propertySet = 0;
+                propertyId = 0;
+            }
+        }
+    }
+
+    if (g_OriginalIoctl == NULL) {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+    status = g_OriginalIoctl(DeviceObject, Irp);
+
+    VcamDiagBump(10);
+    VcamDiagRecord(L"Io", code, 0, status);
+    if (code == IOCTL_KS_PROPERTY) {
+        VcamDiagRecord(L"Pr", propertySet, propertyId, status);
+    }
+    return status;
 }
 
 //------------------------------------------------------------------------------
@@ -946,6 +1025,9 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
     // this device is counted, whether or not a pin ever gets created.
     g_OriginalCreate = DriverObject->MajorFunction[IRP_MJ_CREATE];
     DriverObject->MajorFunction[IRP_MJ_CREATE] = VcamDeviceCreate;
+
+    g_OriginalIoctl = DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL];
+    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = VcamDeviceIoctl;
 
     return status;
 }
