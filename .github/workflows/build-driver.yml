@@ -208,13 +208,19 @@ jobs:
 
           # Trust the cert here only so signtool's verify is happy; the test
           # machine needs PS3EyeTest.cer in LocalMachine\Trusted Root and
-          # Trusted Publishers.
-          $public = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
-            $cert.Export('Cert'))
-          $root = New-Object System.Security.Cryptography.X509Certificates.X509Store('Root', 'CurrentUser')
-          $root.Open('ReadWrite')
-          $root.Add($public)
-          $root.Close()
+          # Trusted Publishers. X509Store.Add blocks on a trust prompt on this
+          # image, so use certutil, capped in case it does the same.
+          $p = Start-Process -FilePath "$env:WINDIR\System32\certutil.exe" -NoNewWindow -PassThru `
+            -ArgumentList @('-user', '-addstore', '-f', 'Root', "$out\PS3EyeTest.cer") `
+            -RedirectStandardOutput "$env:RUNNER_TEMP\certutil.log" `
+            -RedirectStandardError "$env:RUNNER_TEMP\certutil.log.err"
+          if (-not $p.WaitForExit(90 * 1000)) {
+            $p.Kill()
+            Write-Host '::warning::certutil did not return; verification will run untrusted'
+          } else {
+            Get-Content "$env:RUNNER_TEMP\certutil.log", "$env:RUNNER_TEMP\certutil.log.err" `
+              -ErrorAction SilentlyContinue | Write-Host
+          }
           Write-Host '::notice::certificate is ready'
 
       - name: Sign the driver package
