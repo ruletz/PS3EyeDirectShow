@@ -210,13 +210,14 @@ static VCAM_STATE g_Vcam;
 // client actually got. Values are written at PASSIVE_LEVEL only.
 //------------------------------------------------------------------------------
 
-#define VCAM_DIAG_COUNT 11
+#define VCAM_DIAG_COUNT 15
 
 static const WCHAR *const g_DiagNames[VCAM_DIAG_COUNT] = {
     L"DiagPinCreate",     L"DiagPinCreateFail", L"DiagSetFormat",
     L"DiagSetFormatFail", L"DiagRun",           L"DiagProcess",
     L"DiagSubFormat",     L"DiagFormatSize",    L"DiagLoaded",
-    L"DiagOpen",          L"DiagIoctl"};
+    L"DiagOpen",          L"DiagIoctl",         L"DiagWantSpec",
+    L"DiagWantSize",      L"DiagWantWidth",     L"DiagWantHeight"};
 
 static HANDLE g_DiagKey = NULL;
 static LONG g_Diag[VCAM_DIAG_COUNT];
@@ -906,6 +907,112 @@ static const GUID g_FilterCategories[3] = {
     {0xe5323777, 0xf976, 0x4f5b, {0x9b, 0x55, 0xb9, 0x46, 0x99, 0xc4, 0x6e, 0x44}},
 };
 
+// AVStream's default intersection handler returned STATUS_NOT_FOUND for every
+// request Media Foundation made, so the browser never got as far as creating a
+// pin. This handler answers what a client actually needs: it matches the major
+// type, subtype and specifier, and returns the single format this device has.
+// Frame size and rate in the request are not used to reject a match - a client
+// that asked for something else simply gets 640x480 at 30 fps back, and can
+// reject it itself.
+static const GUID kSpecifierVideoInfo2 = {
+    0x05589f81, 0xc356, 0x11ce, {0xbf, 0x01, 0x00, 0xaa, 0x00, 0x55, 0x59, 0x5a}};
+
+static VOID VcamFillFormatHeader(PVOID Data, ULONG FormatSize, BOOLEAN Second) {
+    PKS_DATAFORMAT_VIDEOINFOHEADER2 out2 = (PKS_DATAFORMAT_VIDEOINFOHEADER2)Data;
+    PKS_DATAFORMAT_VIDEOINFOHEADER out1 = (PKS_DATAFORMAT_VIDEOINFOHEADER)Data;
+
+    RtlZeroMemory(Data, FormatSize);
+
+    if (Second) {
+        RtlCopyMemory(&out2->DataFormat, &g_VideoRange.DataRange,
+                      sizeof(KSDATAFORMAT));
+        out2->DataFormat.Specifier = kSpecifierVideoInfo2;
+        out2->DataFormat.FormatSize = FormatSize;
+        out2->DataFormat.SampleSize = PS3EYE_FRAME_SIZE;
+        out2->VideoInfoHeader2.rcSource.right = PS3EYE_WIDTH;
+        out2->VideoInfoHeader2.rcSource.bottom = PS3EYE_HEIGHT;
+        out2->VideoInfoHeader2.rcTarget = out2->VideoInfoHeader2.rcSource;
+        out2->VideoInfoHeader2.dwBitRate = PS3EYE_BITS_PER_SECOND;
+        out2->VideoInfoHeader2.AvgTimePerFrame = PS3EYE_FRAME_INTERVAL_100NS;
+        out2->VideoInfoHeader2.dwPictAspectRatioX = PS3EYE_WIDTH;
+        out2->VideoInfoHeader2.dwPictAspectRatioY = PS3EYE_HEIGHT;
+        RtlCopyMemory(&out2->VideoInfoHeader2.bmiHeader,
+                      &g_VideoRange.VideoInfoHeader.bmiHeader,
+                      sizeof(KS_BITMAPINFOHEADER));
+    } else {
+        // bmiHeader sits in a different place in the two structures, so this
+        // case is written out separately rather than reusing the code above.
+        RtlCopyMemory(&out1->DataFormat, &g_VideoRange.DataRange,
+                      sizeof(KSDATAFORMAT));
+        out1->DataFormat.FormatSize = FormatSize;
+        out1->DataFormat.SampleSize = PS3EYE_FRAME_SIZE;
+        // KS_VIDEOINFOHEADER is exactly the VIDEOINFOHEADER the client expects
+        // for this specifier.
+        RtlCopyMemory(&out1->VideoInfoHeader,
+                      &g_VideoRange.VideoInfoHeader,
+                      sizeof(KS_VIDEOINFOHEADER));
+        out1->VideoInfoHeader.bmiHeader.biSizeImage = PS3EYE_FRAME_SIZE;
+    }
+}
+
+static NTSTATUS VcamPinIntersect(PVOID Context, PIRP Irp, PKSP_PIN Pin,
+                                 PKSDATARANGE DataRange,
+                                 PKSDATARANGE MatchingDataRange,
+                                 ULONG DataBufferSize, PVOID Data,
+                                 PULONG DataSize) {
+    ULONG formatSize;
+    BOOLEAN second;
+
+    UNREFERENCED_PARAMETER(Context);
+    UNREFERENCED_PARAMETER(Irp);
+    UNREFERENCED_PARAMETER(Pin);
+
+    if (DataRange == NULL || MatchingDataRange == NULL || DataSize == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // Recorded so a refused match says what the client asked for.
+    VcamDiagSet(11, DataRange->Specifier.Data1);
+    VcamDiagSet(12, DataRange->FormatSize);
+    if (DataRange->FormatSize >= sizeof(KS_DATARANGE_VIDEO)) {
+        const KS_DATARANGE_VIDEO *range = (const KS_DATARANGE_VIDEO *)DataRange;
+
+        VcamDiagSet(13, (ULONG)range->VideoInfoHeader.bmiHeader.biWidth);
+        VcamDiagSet(14, (ULONG)range->VideoInfoHeader.bmiHeader.biHeight);
+    }
+
+    if (!IsEqualGUID(&DataRange->MajorFormat, &kMajorTypeVideo) ||
+        !IsEqualGUID(&DataRange->SubFormat, &kSubtypeRgb24)) {
+        return STATUS_NO_MATCH;
+    }
+
+    if (IsEqualGUID(&DataRange->Specifier, &kSpecifierVideoInfo2)) {
+        second = TRUE;
+        formatSize = sizeof(KSDATAFORMAT) + sizeof(KS_VIDEOINFOHEADER2);
+    } else if (IsEqualGUID(&DataRange->Specifier,
+                           &g_VideoRange.DataRange.Specifier)) {
+        second = FALSE;
+        formatSize = sizeof(KSDATAFORMAT) + sizeof(KS_VIDEOINFOHEADER);
+    } else {
+        return STATUS_NO_MATCH;
+    }
+
+    *DataSize = formatSize;
+    if (DataBufferSize == 0) {
+        // Size-only query.
+        return STATUS_BUFFER_OVERFLOW;
+    }
+    if (Data == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (DataBufferSize < formatSize) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    VcamFillFormatHeader(Data, formatSize, second);
+    return STATUS_SUCCESS;
+}
+
 static const KSPIN_DESCRIPTOR_EX g_PinDescriptors[1] = {
     {
         .Dispatch = &g_PinDispatch,
@@ -931,7 +1038,7 @@ static const KSPIN_DESCRIPTOR_EX g_PinDescriptors[1] = {
         // graph builder know it must instantiate it.
         .InstancesNecessary = 1,
         .AllocatorFraming = &g_PinAllocatorFraming,
-        .IntersectHandler = NULL,
+        .IntersectHandler = VcamPinIntersect,
     },
 };
 
