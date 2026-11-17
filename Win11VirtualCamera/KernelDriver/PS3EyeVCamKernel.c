@@ -39,6 +39,17 @@
 #endif
 
 #include <ntddk.h>
+
+// ks.h declares KsAcquireCachedMdl with a "BOOL *Cached" parameter and
+// ksmedia.h describes the DirectSound3D structs with FLOAT members, but only
+// user-mode windef.h defines those two types - the kernel headers never do, so
+// ks.h does not compile as C straight from ntddk.h. Declaring them here is
+// enough: this driver uses neither type.
+#if !defined(_WINDEF_)
+typedef LONG BOOL;
+typedef float FLOAT;
+#endif
+
 #include <ks.h>
 #include <ksmedia.h>
 
