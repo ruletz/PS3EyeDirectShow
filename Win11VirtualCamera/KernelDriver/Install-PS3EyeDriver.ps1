@@ -32,11 +32,17 @@
 param(
     [switch]$Uninstall,
     [switch]$Quiet,
-    [string]$InstallDir = $PSScriptRoot,
+    [string]$InstallDir,
     [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
+
+# $PSScriptRoot is empty while parameters are bound if the script was started
+# with `powershell -File`, which made the default install dir an empty string.
+if ([string]::IsNullOrEmpty($InstallDir)) {
+    $InstallDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+}
 
 $HardwareId = 'ROOT\PS3EyeVCam'
 $DeviceDesc = 'PS3 Eye Camera'
