@@ -192,6 +192,44 @@ typedef struct _VCAM_STATE {
 static VCAM_STATE g_Vcam;
 
 //------------------------------------------------------------------------------
+// Diagnostics
+//
+// A stream that fails to start gives no error a user-mode tool can read, and
+// DbgPrint needs an attached debugger. These counters are written to the
+// driver's service key, so after a failed capture attempt
+// HKLM\SYSTEM\CurrentControlSet\Services\PS3EyeVCamKernel shows how far the
+// client actually got. Values are written at PASSIVE_LEVEL only.
+//------------------------------------------------------------------------------
+
+#define VCAM_DIAG_COUNT 8
+
+static const WCHAR *const g_DiagNames[VCAM_DIAG_COUNT] = {
+    L"DiagPinCreate",     L"DiagPinCreateFail", L"DiagSetFormat",
+    L"DiagSetFormatFail", L"DiagRun",           L"DiagProcess",
+    L"DiagSubFormat",     L"DiagFormatSize"};
+
+static HANDLE g_DiagKey = NULL;
+static LONG g_Diag[VCAM_DIAG_COUNT];
+
+static VOID VcamDiagSet(ULONG Index, ULONG Value) {
+    UNICODE_STRING valueName;
+
+    if (g_DiagKey == NULL || Index >= VCAM_DIAG_COUNT ||
+        KeGetCurrentIrql() != PASSIVE_LEVEL) {
+        return;
+    }
+    RtlInitUnicodeString(&valueName, g_DiagNames[Index]);
+    ZwSetValueKey(g_DiagKey, &valueName, 0, REG_DWORD, &Value, sizeof(Value));
+}
+
+static VOID VcamDiagBump(ULONG Index) {
+    if (Index >= VCAM_DIAG_COUNT) {
+        return;
+    }
+    VcamDiagSet(Index, (ULONG)InterlockedIncrement(&g_Diag[Index]));
+}
+
+//------------------------------------------------------------------------------
 // Shared memory access (PASSIVE_LEVEL only)
 //------------------------------------------------------------------------------
 
@@ -447,8 +485,10 @@ static NTSTATUS VcamPinCreate(PKSPIN Pin, PIRP Irp) {
 
     if (i == VCAM_MAX_PINS) {
         // Too many apps at once; let the client try again later.
+        VcamDiagBump(1);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
+    VcamDiagBump(0);
 
     // PASSIVE_LEVEL: the capture service may not exist yet, frames then simply
     // stay black until it does.
@@ -533,8 +573,13 @@ static NTSTATUS VcamPinSetDataFormat(PKSPIN Pin, PKSDATAFORMAT OldFormat,
     UNREFERENCED_PARAMETER(AttributeRange);
 
     if (DataRange == NULL) {
+        VcamDiagBump(3);
         return STATUS_INVALID_PARAMETER;
     }
+    // Recorded even when the format is refused: which subtype the client asked
+    // for is the first thing to look at when a stream will not start.
+    VcamDiagSet(6, DataRange->SubFormat.Data1);
+    VcamDiagSet(7, DataRange->FormatSize);
     // Accept our RGB24 format; anything else must be refused so the client
     // negotiates again instead of receiving mis-labelled buffers.
     if (DataRange->FormatSize < sizeof(KSDATAFORMAT)) {
@@ -542,9 +587,11 @@ static NTSTATUS VcamPinSetDataFormat(PKSPIN Pin, PKSDATAFORMAT OldFormat,
     }
     if (!IsEqualGUID(&DataRange->MajorFormat, &kMajorTypeVideo) ||
         !IsEqualGUID(&DataRange->SubFormat, &kSubtypeRgb24)) {
+        VcamDiagBump(3);
         return STATUS_INVALID_PARAMETER;
     }
 
+    VcamDiagBump(2);
     return STATUS_SUCCESS;
 }
 
@@ -576,6 +623,8 @@ static NTSTATUS VcamPinSetDeviceState(PKSPIN Pin, KSSTATE ToState,
             }
         }
         KeReleaseSpinLock(&g_Vcam.Lock, oldIrql);
+
+        VcamDiagBump(4);
 
         if (startTimer) {
             LARGE_INTEGER dueTime;
@@ -708,6 +757,7 @@ static NTSTATUS VcamPinProcess(PKSPIN Pin) {
     if (slot == NULL) {
         return STATUS_PENDING;
     }
+    VcamDiagBump(5);
     return VcamDeliverFrame(Pin, &slot->LastFrameNumber);
 }
 
@@ -751,9 +801,13 @@ static VOID VcamTimerDpc(PKDPC Dpc, PVOID DeferredContext, PVOID SystemArgument1
 // and DirectShow. Both categories are published, as real capture devices do:
 // VIDEO_CAMERA is what the camera stack and browsers enumerate, CAPTURE is what
 // DirectShow's video input enumerator looks for.
-static const GUID g_FilterCategories[2] = {
-    {0xe5323777, 0xf976, 0x4f5b, {0x9b, 0x55, 0xb9, 0x46, 0x99, 0xc4, 0x6e, 0x44}},
+// Same three categories the AVStream capture samples publish: KSCATEGORY_VIDEO
+// and KSCATEGORY_CAPTURE are what the DirectShow and KS proxy paths look for,
+// KSCATEGORY_VIDEO_CAMERA is what the camera stack and browsers enumerate.
+static const GUID g_FilterCategories[3] = {
+    {0x6994ad05, 0x93ef, 0x11d0, {0xa3, 0xcc, 0x00, 0xa0, 0xc9, 0x22, 0x31, 0x96}},
     {0x65e8773d, 0x8f56, 0x11d0, {0xa3, 0xb9, 0x00, 0xa0, 0xc9, 0x22, 0x31, 0x96}},
+    {0xe5323777, 0xf976, 0x4f5b, {0x9b, 0x55, 0xb9, 0x46, 0x99, 0xc4, 0x6e, 0x44}},
 };
 
 static const KSPIN_DESCRIPTOR_EX g_PinDescriptors[1] = {
@@ -789,14 +843,15 @@ static const KSFILTER_DESCRIPTOR g_FilterDescriptor = {
     .Dispatch = NULL,
     .AutomationTable = NULL,
     .Version = KSFILTER_DESCRIPTOR_VERSION,
-    // Prioritise the reference GUID: required for anything that publishes
-    // camera profiles, and it is what the INF binds to.
-    .Flags = KSFILTER_FLAG_PRIORITIZE_REFERENCEGUID,
+    // No KSFILTER_FLAG_PRIORITIZE_REFERENCEGUID: that flag announces camera
+    // profile support, which this driver does not implement. The capture
+    // samples leave it clear.
+    .Flags = 0,
     .ReferenceGuid = &kFilterReferenceGuid,
     .PinDescriptorsCount = 1,
     .PinDescriptorSize = sizeof(KSPIN_DESCRIPTOR_EX),
     .PinDescriptors = g_PinDescriptors,
-    .CategoriesCount = 2,
+    .CategoriesCount = 3,
     .Categories = g_FilterCategories,
     .NodeDescriptorsCount = 0,
     .NodeDescriptorSize = sizeof(KSNODE_DESCRIPTOR),
@@ -846,6 +901,17 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
     NTSTATUS status;
 
     RtlZeroMemory(&g_Vcam, sizeof(g_Vcam));
+
+    {
+        OBJECT_ATTRIBUTES attributes;
+        // RegistryPath already points at this driver's service key.
+        InitializeObjectAttributes(&attributes, RegistryPath,
+                                   OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL,
+                                   NULL);
+        if (!NT_SUCCESS(ZwOpenKey(&g_DiagKey, KEY_SET_VALUE, &attributes))) {
+            g_DiagKey = NULL;
+        }
+    }
 
     status = KsInitializeDriver(DriverObject, RegistryPath, &g_DeviceDescriptor);
     if (!NT_SUCCESS(status)) {
