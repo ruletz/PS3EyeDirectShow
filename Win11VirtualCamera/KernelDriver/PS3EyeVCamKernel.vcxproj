@@ -49,9 +49,6 @@
     <TargetExt>.sys</TargetExt>
     <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
     <EnableInf2cat>false</EnableInf2cat>
-    <!-- The WDK's InfVerif task cannot load its x86\InfVerif.dll on some
-         images; the INF is still validated by the Inf2Cat step of the build. -->
-    <EnableInfVerif>false</EnableInfVerif>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -85,8 +82,9 @@
   <ItemGroup>
     <ClCompile Include="PS3EyeVCamKernel.c" />
   </ItemGroup>
-  <ItemGroup>
-    <Inf Include="PS3EyeVCamKernel.inf" />
-  </ItemGroup>
+  <!-- The INF is deliberately not a project item: listing it makes msbuild run
+       the WDK's InfVerif, which cannot load its x86\InfVerif.dll on the build
+       image. The INF is packaged and validated by Inf2Cat in the build script
+       instead. -->
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>
