@@ -49,13 +49,22 @@
 #define _NTDDK_
 #endif
 
-// Even on the kernel path ks.h declares KsAcquireCachedMdl with a "BOOL *"
-// parameter and ksmedia.h describes the DirectSound3D structs with FLOAT
-// members, but the kernel headers define neither - they come from user-mode
-// windef.h. This driver uses neither type.
+// Both KS headers still describe user-mode-flavoured structures - the
+// DirectSound3D ones use BOOL and FLOAT, the audio ones DWORD, WORD and BYTE,
+// and a topology endpoint id is MAX_PATH long - but those type names only exist
+// in user-mode windef.h, which a driver never includes. Supply the same
+// underlying types so the headers parse; this driver uses none of them.
 #if !defined(_WINDEF_)
 typedef LONG BOOL;
 typedef float FLOAT;
+typedef ULONG DWORD;
+typedef USHORT WORD;
+typedef UCHAR BYTE;
+typedef ULONGLONG DWORDLONG;
+#endif
+
+#if !defined(MAX_PATH)
+#define MAX_PATH 260
 #endif
 
 #include <ks.h>
