@@ -22,15 +22,16 @@
 // KsCreateFilterFactory. See README.md for building and signing; the driver
 // must be test-signed (or attestation/WHQL-signed) before Windows loads it.
 
-// GUID declaration for a C build. Outside C++ ks.h falls back to its own
-// DEFINE_GUIDEX, "EXTERN_C const CDECL GUID name", which MSVC's C front end
-// rejects (calling convention on a variable) and which defines no GUID anyway;
-// the CDECL it needs only exists in user-mode winnt.h. user-mode guiddef.h
-// avoids both problems by initialising from the STATIC_ macro, and ks.h emits
-// one of those immediately before every DEFINE_GUIDSTRUCT, so do the same.
-// C++ builds never reach this code: there GUIDs are uuid-decorated structs.
+// ks.h's C fallback for DEFINE_GUIDSTRUCT is "EXTERN_C const CDECL GUID name".
+// MSVC's C front end rejects a calling convention on a variable, and the CDECL
+// it wants is only declared in user-mode winnt.h, so ks.h does not compile as C
+// as shipped. Declaring the GUIDs without a calling convention is enough here:
+// this driver defines the few GUID values it uses itself (kCategoryVideoCamera,
+// kCategoryCapture), so no ks.h GUID symbol is ever needed at link time.
+// (In C++ builds none of this applies: there the GUIDs are uuid-decorated
+// structs that resolve at compile time.)
 #if !defined(DEFINE_GUIDEX)
-#define DEFINE_GUIDEX(name) EXTERN_C const GUID name = { STATIC_##name }
+#define DEFINE_GUIDEX(name) EXTERN_C const GUID name
 #endif
 
 #if !defined(CDECL)

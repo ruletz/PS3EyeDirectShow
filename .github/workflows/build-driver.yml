@@ -107,37 +107,6 @@ jobs:
           & "$env:GITHUB_WORKSPACE\.github\scripts\report-errors.ps1" $log 'driver build'
           exit $code
 
-      # Temporary: the driver's failures are inside WDK headers, so the header
-      # text itself has to come out. Emitted only when the driver build failed.
-      - name: Dump header context
-        if: failure()
-        shell: pwsh
-        run: |
-          $inc = 'C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0'
-          $chunks = New-Object System.Collections.Generic.List[string]
-
-          function Add-Range($path, $from, $count, $tag) {
-            $lines = Get-Content $path
-            $text = ($lines | Select-Object -Skip ($from - 1) -First $count) -join ' // '
-            $text = $text -replace '%', '%25' -replace "`n", ' '
-            $chunks.Add("${tag}: $text")
-          }
-
-          Add-Range "$inc\shared\ksmedia.h" 838 16 'ksmedia 838'
-          Add-Range "$inc\shared\ksmedia.h" 1124 18 'ksmedia 1124'
-          $ntdef = Select-String -Path "$inc\km\ntdef.h" -Pattern 'FLOAT|BOOL;|typedef.*BOOL'
-          foreach ($m in ($ntdef | Select-Object -First 4)) {
-            $chunks.Add("ntdef $(($m.LineNumber)): $($m.Line.Trim())")
-          }
-          $mm = Select-String -Path "$inc\shared\ksmedia.h" -Pattern 'mmreg\.h|WINAPI_FAMILY'
-          foreach ($m in ($mm | Select-Object -First 3)) {
-            $chunks.Add("ksmedia $(($m.LineNumber)): $($m.Line.Trim())")
-          }
-
-          foreach ($c in ($chunks | Select-Object -First 8)) {
-            Write-Host "::error::$($c.Substring(0, [Math]::Min(880, $c.Length)))"
-          }
-
       - name: Build capture service
         shell: pwsh
         run: |
