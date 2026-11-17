@@ -1,8 +1,11 @@
 name: Build driver
 
-# UNTESTED: never run. The driver it builds has never been compiled either, so
-# the first scheduled run is expected to fail and produce the error list this
-# workflow exists to collect. Treat the SDK/WDK install step as untested too.
+# UNTESTED: the driver it builds has never been compiled, so runs are expected
+# to fail with real compiler errors; the log is the point of this job. No SDK or
+# WDK is installed here on purpose: the windows-2022 image already ships the WDK
+# (10.1.26100) with its Visual Studio extension and SDK 10.0.22621, which is what
+# this project targets. Downloading the installers (the previous approach) fails
+# on the runner with "The file or directory is corrupted and unreadable".
 #
 # Builds the AVStream camera driver and the capture service in the cloud, so no
 # Visual Studio / WDK install is needed on a developer machine. Artifacts are
@@ -27,28 +30,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The WDK is not part of the runner image. Install the SDK it needs, then
-      # the WDK; "/features +" pulls in the Visual Studio integration, which is
-      # what makes the WindowsKernelModeDriver10.0 platform toolset resolve.
-      - name: Install Windows SDK and WDK
+      # The WDK is part of the runner image, so nothing is installed here. Fail
+      # early with a readable message if that ever stops being true, instead of
+      # letting the driver build die on an unresolved platform toolset.
+      - name: Verify the WDK toolset is present
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-
-          curl.exe -sSL -o winsdksetup.exe https://aka.ms/winsdksetup
-          $sdk = Start-Process .\winsdksetup.exe -ArgumentList '/features +','/quiet','/norestart' -Wait -PassThru
-          Write-Host "SDK setup exit code: $($sdk.ExitCode)"
-          # 0 = success, 3010 = success but a reboot would be pending (fine here)
-          if ($sdk.ExitCode -ne 0 -and $sdk.ExitCode -ne 3010) {
-            throw "SDK setup failed with $($sdk.ExitCode)"
+          $km = 'C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\km'
+          if (-not (Test-Path $km)) { throw "WDK kernel-mode headers not found at $km" }
+          if (-not (Test-Path 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x86\Inf2Cat.exe')) {
+            throw 'Inf2Cat not found'
           }
-
-          curl.exe -sSL -o wdksetup.exe https://aka.ms/wdksetup
-          $wdk = Start-Process .\wdksetup.exe -ArgumentList '/features +','/quiet','/norestart' -Wait -PassThru
-          Write-Host "WDK setup exit code: $($wdk.ExitCode)"
-          if ($wdk.ExitCode -ne 0 -and $wdk.ExitCode -ne 3010) {
-            throw "WDK setup failed with $($wdk.ExitCode)"
-          }
+          Write-Host "WDK present: $km"
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
