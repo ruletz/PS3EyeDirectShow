@@ -13,7 +13,59 @@
 //
 // Nothing here touches the USB pipes, the frame stream, or the pin state.
 
+// ks.h does not compile as C as shipped: its DEFINE_GUIDSTRUCT fallback is
+// "EXTERN_C const CDECL GUID name", and a calling convention on a variable is
+// rejected. The KS headers also take user-mode branches unless _NTDDK_ is set
+// and expect windef types a driver never includes. This is the same shim the
+// AVStream driver uses; none of those symbols are used here.
+#if !defined(DEFINE_GUIDEX)
+#define DEFINE_GUIDEX(name) EXTERN_C const GUID name
+#endif
+
+#if !defined(CDECL)
+#define CDECL __cdecl
+#endif
+
 #include <ntddk.h>
+
+#if !defined(_NTDDK_)
+#define _NTDDK_
+#endif
+
+#if !defined(_WINDEF_)
+typedef LONG BOOL;
+typedef float FLOAT;
+typedef ULONG DWORD;
+typedef USHORT WORD;
+typedef UCHAR BYTE;
+typedef ULONGLONG DWORDLONG;
+typedef unsigned int UINT;
+typedef struct tagRECT {
+    LONG left;
+    LONG top;
+    LONG right;
+    LONG bottom;
+} RECT, *PRECT;
+typedef struct tagSIZE {
+    LONG cx;
+    LONG cy;
+} SIZE, *PSIZE;
+#endif
+
+#if !defined(WINAPI)
+#define WINAPI __stdcall
+#endif
+
+#if !defined(CALLBACK)
+#define CALLBACK __stdcall
+#endif
+
+#if !defined(MAX_PATH)
+#define MAX_PATH 260
+#endif
+
+#include <sal.h>
+
 #include <ks.h>
 #include <ksmedia.h>
 
