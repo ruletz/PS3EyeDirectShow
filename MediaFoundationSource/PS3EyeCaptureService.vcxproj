@@ -60,7 +60,7 @@
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir)..\PS3EYEDriver;$(ProjectDir)..\libusb\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\PS3EYEDriver\src;$(ProjectDir)..\libusb\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -80,7 +80,7 @@
       <PreprocessorDefinitions>NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir)..\PS3EYEDriver;$(ProjectDir)..\libusb\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\PS3EYEDriver\src;$(ProjectDir)..\libusb\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
       <OmitFramePointers>true</OmitFramePointers>
     </ClCompile>
@@ -98,12 +98,12 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="PS3EyeSharedMemory.h" />
-    <ClInclude Include="..\PS3EYEDriver\ps3eye.h" />
+    <ClInclude Include="..\PS3EYEDriver\src\ps3eye.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="PS3EyeCaptureService.cpp" />
     <ClCompile Include="PS3EyeSharedMemory.cpp" />
-    <ClCompile Include="..\PS3EYEDriver\ps3eye.cpp" />
+    <ClCompile Include="..\PS3EYEDriver\src\ps3eye.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>
