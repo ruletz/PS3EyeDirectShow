@@ -27,7 +27,8 @@
 // it wants is only declared in user-mode winnt.h, so ks.h does not compile as C
 // as shipped. Declaring the GUIDs without a calling convention is enough here:
 // this driver defines the few GUID values it uses itself (kCategoryVideoCamera,
-// kCategoryCapture), so no ks.h GUID symbol is ever needed at link time.
+// kCategoryCapture, kPinCategoryCapture), so no ks.h GUID symbol is ever needed
+// at link time.
 // (In C++ builds none of this applies: there the GUIDs are uuid-decorated
 // structs that resolve at compile time.)
 #if !defined(DEFINE_GUIDEX)
@@ -155,6 +156,14 @@ static const GUID kCategoryVideoCamera = {
     0xe5323777, 0xf976, 0x4f5b, {0x9b, 0x55, 0xb9, 0x46, 0x99, 0xc4, 0x6e, 0x44}};
 static const GUID kCategoryCapture = {
     0x65e8773d, 0x8f56, 0x11d0, {0xa3, 0xb9, 0x00, 0xa0, 0xc9, 0x22, 0x31, 0x96}};
+
+// PINNAME_VIDEO_CAPTURE. A pin's Category is a *pin* category, not a filter
+// one: Media Foundation and DirectShow locate the capture pin of a device by
+// asking for this GUID. Publishing the filter's KSCATEGORY_CAPTURE here instead
+// leaves the device with a pin nobody can find, which is what a browser reports
+// as "could not start video source" without ever creating a pin.
+static const GUID kPinCategoryCapture = {
+    0xfb6c4281, 0x0353, 0x11d1, {0x90, 0x5f, 0x00, 0x00, 0xc0, 0xcc, 0x16, 0xba}};
 
 // Filter identity (also referenced by PS3EyeVCamKernel.inf).
 static const GUID kFilterReferenceGuid = {
@@ -804,18 +813,16 @@ static VOID VcamTimerDpc(PKDPC Dpc, PVOID DeferredContext, PVOID SystemArgument1
 //------------------------------------------------------------------------------
 
 // KSFILTER_DESCRIPTOR.Categories is a flat array of GUIDs (const GUID *), not
-// an array of GUID pointers. Declaring it as an array of pointers made ks.sys
-// read the first 16 bytes of the pointer table as a category GUID, so it
-// registered a single bogus interface and no KSCATEGORY_VIDEO_CAMERA or
-// KSCATEGORY_CAPTURE at all - the device was then invisible to Media Foundation
-// and DirectShow. Both categories are published, as real capture devices do:
-// VIDEO_CAMERA is what the camera stack and browsers enumerate, CAPTURE is what
-// DirectShow's video input enumerator looks for.
+// an array of GUID pointers: as an array of pointers, ks.sys reads the pointer
+// table itself as GUIDs and registers junk interfaces.
+//
 // Same three categories the AVStream capture samples publish: KSCATEGORY_VIDEO
 // and KSCATEGORY_CAPTURE are what the DirectShow and KS proxy paths look for,
 // KSCATEGORY_VIDEO_CAMERA is what the camera stack and browsers enumerate.
 static const GUID g_FilterCategories[3] = {
     {0x6994ad05, 0x93ef, 0x11d0, {0xa3, 0xcc, 0x00, 0xa0, 0xc9, 0x22, 0x31, 0x96}},
+    // KSCATEGORY_CAPTURE / KSCATEGORY_VIDEO_CAMERA, kept spelled out above this
+    // table because the initialiser needs the literal values.
     {0x65e8773d, 0x8f56, 0x11d0, {0xa3, 0xb9, 0x00, 0xa0, 0xc9, 0x22, 0x31, 0x96}},
     {0xe5323777, 0xf976, 0x4f5b, {0x9b, 0x55, 0xb9, 0x46, 0x99, 0xc4, 0x6e, 0x44}},
 };
@@ -836,7 +843,7 @@ static const KSPIN_DESCRIPTOR_EX g_PinDescriptors[1] = {
             // the renderer side, and KSProxy refuses SINK-only pins on some
             // capture paths.
             .Communication = KSPIN_COMMUNICATION_BOTH,
-            .Category = &kCategoryCapture,
+            .Category = &kPinCategoryCapture,
             .Name = NULL,
         },
         .Flags = KSPIN_FLAG_PROCESS_IN_RUN_STATE_ONLY,
