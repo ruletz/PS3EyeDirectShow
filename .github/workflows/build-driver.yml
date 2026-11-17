@@ -176,17 +176,39 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $out = Resolve-Path 'Win11VirtualCamera\bin\x64\Release'
 
+          # signtool can sit on a network CRL lookup for hours on the runner, so
+          # every external call is bounded and reported.
+          function Invoke-Capped {
+            param([string] $Exe, [string[]] $Arguments, [string] $Label, [int] $TimeoutSec = 240)
+            $logPath = Join-Path $env:RUNNER_TEMP "$Label.log"
+            $p = Start-Process -FilePath $Exe -ArgumentList $Arguments -NoNewWindow -PassThru `
+              -RedirectStandardOutput $logPath -RedirectStandardError "$logPath.err"
+            if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+              $p.Kill()
+              Write-Host "::error::$Label timed out after $TimeoutSec s"
+              Get-Content $logPath -ErrorAction SilentlyContinue | Write-Host
+              Get-Content "$logPath.err" -ErrorAction SilentlyContinue | Write-Host
+              exit 1
+            }
+            Get-Content $logPath -ErrorAction SilentlyContinue | Write-Host
+            Get-Content "$logPath.err" -ErrorAction SilentlyContinue | Write-Host
+            return $p.ExitCode
+          }
+
+          Write-Host '::notice::creating test certificate'
           $cert = New-SelfSignedCertificate -Type CodeSigningCert `
             -Subject 'CN=PS3EyeTest' `
             -CertStoreLocation 'Cert:\CurrentUser\My' `
             -HashAlgorithm SHA256 -KeyUsage DigitalSignature `
+            -KeyExportPolicy Exportable -Provider 'Microsoft Software Key Storage Provider' `
             -NotAfter (Get-Date).AddYears(2)
           $thumb = $cert.Thumbprint
-          Write-Host "Cert thumbprint: $thumb"
+          Write-Host "::notice::cert thumbprint: $thumb"
 
           Export-Certificate -Cert $cert -FilePath "$out\PS3EyeTest.cer" | Out-Null
           $pw = ConvertTo-SecureString -String 'ps3eye' -Force -AsPlainText
           Export-PfxCertificate -Cert $cert -FilePath "$out\PS3EyeTest.pfx" -Password $pw | Out-Null
+          Write-Host '::notice::exported cer and pfx'
 
           # Trust the cert in this store only so signtool is happy; the test
           # machine needs PS3EyeTest.cer in LocalMachine\Trusted Root and
@@ -200,11 +222,13 @@ jobs:
           if (-not $signtool) { Write-Host '::error::signtool not found'; exit 1 }
 
           foreach ($f in @("$out\PS3EyeVCamKernel.sys", "$out\PS3EyeVCamKernel.cat")) {
-            & $signtool sign /v /fd SHA256 /sha1 $thumb $f 2>&1 | Write-Host
-            if ($LASTEXITCODE -ne 0) { Write-Host "::error::signtool sign failed on $f"; exit 1 }
+            Write-Host "::notice::signing $(Split-Path $f -Leaf)"
+            $code = Invoke-Capped $signtool @('sign', '/v', '/fd', 'SHA256', '/sha1', $thumb, $f) 'sign'
+            if ($code -ne 0) { Write-Host "::error::signtool sign failed on $f"; exit 1 }
           }
-          & $signtool verify /v /pa "$out\PS3EyeVCamKernel.cat" 2>&1 | Write-Host
-          if ($LASTEXITCODE -ne 0) { Write-Host '::error::signtool verify /pa failed'; exit 1 }
+          Write-Host '::notice::verifying the catalog'
+          $code = Invoke-Capped $signtool @('verify', '/v', '/pa', "$out\PS3EyeVCamKernel.cat") 'verify'
+          if ($code -ne 0) { Write-Host '::error::signtool verify /pa failed'; exit 1 }
 
       - name: Collect artifacts
         shell: pwsh
