@@ -99,6 +99,19 @@ using System.Runtime.InteropServices;
 
 public static class PS3EyeRootDevice
 {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct SP_DRVINFO_DATA
+    {
+        public int cbSize;
+        public int DriverType;
+        public IntPtr Reserved;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string Description;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string MfgName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string ProviderName;
+        public long DriverDate;
+        public long DriverVersion;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     public struct SP_DEVINFO_DATA
     {
@@ -124,10 +137,24 @@ public static class PS3EyeRootDevice
     private static extern bool SetupDiCallClassInstaller(int installFunction, IntPtr deviceInfoSet,
         ref SP_DEVINFO_DATA deviceInfoData);
 
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool SetupDiBuildDriverInfoList(IntPtr deviceInfoSet,
+        ref SP_DEVINFO_DATA deviceInfoData, int driverType);
+
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool SetupDiEnumDriverInfo(IntPtr deviceInfoSet, ref SP_DEVINFO_DATA deviceInfoData,
+        int driverType, int memberIndex, ref SP_DRVINFO_DATA driverInfoData);
+
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool SetupDiSetSelectedDriver(IntPtr deviceInfoSet, ref SP_DEVINFO_DATA deviceInfoData,
+        ref SP_DRVINFO_DATA driverInfoData);
+
     [DllImport("setupapi.dll", SetLastError = true)]
     private static extern bool SetupDiDestroyDeviceInfoList(IntPtr deviceInfoSet);
 
     private const int DIF_REGISTERDEVICE = 0x00000019;
+    private const int DIF_INSTALLDEVICE = 0x00000002;
+    private const int SPDIT_COMPATDRIVER = 0x00000002;
     private const int SPDRP_HARDWAREID = 0x00000001;
     private const int DICD_GENERATE_ID = 0x00000001;
 
@@ -161,10 +188,25 @@ public static class PS3EyeRootDevice
             if (!SetupDiCallClassInstaller(DIF_REGISTERDEVICE, set, ref info))
                 return "SetupDiCallClassInstaller failed (" + Marshal.GetLastWin32Error() + ")";
 
-            // No binding here: the package is already staged, so PnP installs it
-            // as soon as the node appears. UpdateDriverForPlugAndPlayDevices does
-            // the same thing further down the road and fails with ERROR_NO_SUCH_DEVINST
-            // while the new node is not in the hardware tree yet.
+            // Registering the node is not enough. Nothing runs driver selection
+            // for a device created this way, so it stays on the null driver with
+            // problem 0 and every install trigger (pnputil, newdev, a root
+            // rescan) decides it is already configured. Select the matching
+            // package from the driver store and install it explicitly.
+            if (!SetupDiBuildDriverInfoList(set, ref info, SPDIT_COMPATDRIVER))
+                return "SetupDiBuildDriverInfoList failed (" + Marshal.GetLastWin32Error() + ")";
+
+            SP_DRVINFO_DATA driver = new SP_DRVINFO_DATA();
+            driver.cbSize = Marshal.SizeOf(typeof(SP_DRVINFO_DATA));
+            if (!SetupDiEnumDriverInfo(set, ref info, SPDIT_COMPATDRIVER, 0, ref driver))
+                return "no matching driver package for the hardware id (" + Marshal.GetLastWin32Error() + ")";
+
+            if (!SetupDiSetSelectedDriver(set, ref info, ref driver))
+                return "SetupDiSetSelectedDriver failed (" + Marshal.GetLastWin32Error() + ")";
+
+            if (!SetupDiCallClassInstaller(DIF_INSTALLDEVICE, set, ref info))
+                return "DIF_INSTALLDEVICE failed (" + Marshal.GetLastWin32Error() + ")";
+
             return "";
         }
         finally
@@ -226,6 +268,21 @@ function Install-Driver {
 
     if (-not ('PS3EyeRootDevice' -as [type])) {
         Add-Type -TypeDefinition $RootDeviceSource -Language CSharp
+    }
+
+    # Re-running over a device that is already bound would just pile up another
+    # generated instance, so stop here when there is a working one.
+    $bound = Get-PnpDevice -ErrorAction SilentlyContinue |
+        Where-Object { $_.InstanceId -like ("{0}*" -f $HardwareId) } | Select-Object -First 1
+    if ($bound) {
+        $boundService = ''
+        try {
+            $boundService = (Get-PnpDeviceProperty -InstanceId $bound.InstanceId -KeyName DEVPKEY_Device_Service -ErrorAction Stop).Data
+        } catch { }
+        if ($boundService) {
+            Write-Step ("Already installed: {0} [{1}] via service {2}." -f $bound.FriendlyName, $bound.Status, $boundService) 'OK'
+            return
+        }
     }
 
     Write-Step ("Creating device node {0}..." -f $HardwareId)
