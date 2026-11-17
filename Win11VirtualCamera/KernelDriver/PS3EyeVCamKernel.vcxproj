@@ -15,7 +15,7 @@
     <ProjectGuid>{3FD8B7C4-51A2-4E9B-8C63-2A7E5D90F4B6}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
     <RootNamespace>PS3EyeVCamKernel</RootNamespace>
-    <WindowsTargetPlatformVersion>10.0.22621.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">

@@ -37,12 +37,28 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $km = 'C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\km'
-          if (-not (Test-Path $km)) { throw "WDK kernel-mode headers not found at $km" }
-          if (-not (Test-Path 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x86\Inf2Cat.exe')) {
-            throw 'Inf2Cat not found'
-          }
-          Write-Host "WDK present: $km"
+          $kits = 'C:\Program Files (x86)\Windows Kits\10'
+
+          Write-Host '--- Include versions ---'
+          Get-ChildItem "$kits\Include" -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "  $($_.Name)  km=$(Test-Path (Join-Path $_.FullName 'km'))" }
+          Write-Host '--- build (toolset) dirs ---'
+          Get-ChildItem "$kits\build" -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "  $($_.Name)" }
+
+          # Kernel-mode headers only ship for the WDK's own version, so find the
+          # one that actually has them rather than assuming a version number.
+          $km = Get-ChildItem "$kits\Include" -Directory -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path (Join-Path $_.FullName 'km\ks.h') } |
+            Sort-Object Name | Select-Object -Last 1
+          if (-not $km) { throw "No WDK km headers (km\ks.h) under $kits\Include" }
+          Write-Host "WDK headers found: $($km.FullName)"
+
+          $inf2cat = Get-ChildItem "$kits\bin" -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Join-Path $_.FullName 'x86\Inf2Cat.exe' } |
+            Where-Object { Test-Path $_ } | Select-Object -Last 1
+          if (-not $inf2cat) { throw "Inf2Cat not found under $kits\bin" }
+          Write-Host "Inf2Cat found: $inf2cat"
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
@@ -74,10 +90,11 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $ver = (Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' |
-                  Sort-Object Name | Select-Object -Last 1).Name
-          $inf2cat = "C:\Program Files (x86)\Windows Kits\10\bin\$ver\x86\Inf2Cat.exe"
-          if (-not (Test-Path $inf2cat)) { throw "Inf2Cat not found at $inf2cat" }
+          $kits = 'C:\Program Files (x86)\Windows Kits\10'
+          $inf2cat = Get-ChildItem "$kits\bin" -Directory |
+            ForEach-Object { Join-Path $_.FullName 'x86\Inf2Cat.exe' } |
+            Where-Object { Test-Path $_ } | Select-Object -Last 1
+          if (-not $inf2cat) { throw "Inf2Cat not found under $kits\bin" }
 
           $out = 'Win11VirtualCamera\bin\x64\Release'
           Copy-Item 'Win11VirtualCamera\KernelDriver\PS3EyeVCamKernel.inf' $out -Force
