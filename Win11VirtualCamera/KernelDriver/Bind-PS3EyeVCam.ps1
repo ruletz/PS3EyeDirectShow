@@ -61,6 +61,21 @@ Add-Type -TypeDefinition $src -Language CSharp
 Write-Host "INF       : $InfPath"
 Write-Host "HardwareId: $HardwareId"
 
+# A devnode created by the old installer can hold a mangled hardware id (one
+# character per string, separated by NUL characters), which no install API will
+# ever match. Rewrite it before asking newdev to bind the package.
+$nodePath = 'HKLM:\SYSTEM\CurrentControlSet\Enum\ROOT\PS3EYEVCAM\0000'
+if (Test-Path $nodePath) {
+    $current = (Get-ItemProperty -Path $nodePath -Name HardwareID -ErrorAction SilentlyContinue).HardwareID
+    $joined = if ($null -ne $current) { ($current -join '') } else { '' }
+    if ($joined -ne $HardwareId -or ($current | Where-Object { $_ -eq '' -or $_.Length -le 1 })) {
+        Write-Host ('Repairing hardware id (was {0} entries)...' -f @($current).Count) -ForegroundColor Yellow
+        Remove-ItemProperty -Path $nodePath -Name HardwareID -Force -ErrorAction SilentlyContinue
+        New-ItemProperty -Path $nodePath -Name HardwareID -PropertyType MultiString -Value @($HardwareId) -Force | Out-Null
+        Write-Host ('Hardware id now: {0}' -f ((Get-ItemProperty -Path $nodePath -Name HardwareID).HardwareID -join ','))
+    }
+}
+
 $reboot = $false
 $code = [PnpInstall]::Install($HardwareId, $InfPath, [ref]$reboot)
 
