@@ -1,19 +1,21 @@
 name: Build driver
 
 # UNTESTED: the driver it builds has never been compiled, so runs are expected
-# to fail with real compiler errors; the log is the point of this job. No SDK or
-# WDK is installed here on purpose: the windows-2022 image already ships the WDK
-# (10.1.26100) with its Visual Studio extension and SDK 10.0.22621, which is what
-# this project targets. Downloading the installers (the previous approach) fails
-# on the runner with "The file or directory is corrupted and unreadable".
+# to fail with real compiler errors; the log is the point of this job.
 #
-# Builds the AVStream camera driver and the capture service in the cloud, so no
-# Visual Studio / WDK install is needed on a developer machine. Artifacts are
-# test-signed with a throwaway self-signed certificate: they load on a test
-# machine only if that machine has `bcdedit /set testsigning on`.
+# No SDK or WDK is installed here on purpose: the windows-2022 image already
+# ships the WDK (10.1.26100) with its Visual Studio extension. Downloading the
+# installers (the first approach) failed on the runner with "The file or
+# directory is corrupted and unreadable" before any build ran.
+#
+# Every failure is echoed back out with ::error::/::warning:: so the reason
+# shows up as a check annotation, readable without signing in to the run.
+#
+# Artifacts are test-signed with a throwaway self-signed certificate: they load
+# on a test machine only if that machine has `bcdedit /set testsigning on`.
 on:
   push:
-    branches: [master]
+    branches: [master, driver-build]
     paths:
       - 'Win11VirtualCamera/**'
       - 'MediaFoundationSource/**'
@@ -22,6 +24,7 @@ on:
     paths:
       - 'Win11VirtualCamera/**'
       - 'MediaFoundationSource/**'
+      - '.github/workflows/build-driver.yml'
   workflow_dispatch:
 
 jobs:
@@ -30,61 +33,73 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The WDK is part of the runner image, so nothing is installed here. Fail
-      # early with a readable message if that ever stops being true, instead of
-      # letting the driver build die on an unresolved platform toolset.
-      - name: Verify the WDK toolset is present
+      # Diagnostic only, never fails: if the image loses the WDK the following
+      # build steps will say so, and this tells us where the kits live.
+      - name: Inspect WDK
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
           $kits = 'C:\Program Files (x86)\Windows Kits\10'
+          $inc = @(Get-ChildItem "$kits\Include" -Directory -ErrorAction SilentlyContinue | Sort-Object Name)
+          if ($inc.Count -eq 0) {
+            Write-Host "::warning::no kit include dirs under $kits\Include"
+          } else {
+            $parts = $inc | ForEach-Object { "$($_.Name)(km=$(Test-Path (Join-Path $_.FullName 'km')))" }
+            Write-Host "::warning::include: $($parts -join ' ')"
+          }
 
-          Write-Host '--- Include versions ---'
-          Get-ChildItem "$kits\Include" -Directory -ErrorAction SilentlyContinue |
-            ForEach-Object { Write-Host "  $($_.Name)  km=$(Test-Path (Join-Path $_.FullName 'km'))" }
-          Write-Host '--- build (toolset) dirs ---'
-          Get-ChildItem "$kits\build" -Directory -ErrorAction SilentlyContinue |
-            ForEach-Object { Write-Host "  $($_.Name)" }
+          $build = @(Get-ChildItem "$kits\build" -Directory -ErrorAction SilentlyContinue | Sort-Object Name)
+          if ($build.Count -eq 0) {
+            Write-Host "::warning::no toolset dirs under $kits\build"
+          } else {
+            Write-Host "::warning::toolsets: $($build.Name -join ' ')"
+          }
 
-          # Kernel-mode headers only ship for the WDK's own version, so find the
-          # one that actually has them rather than assuming a version number.
-          $km = Get-ChildItem "$kits\Include" -Directory -ErrorAction SilentlyContinue |
-            Where-Object { Test-Path (Join-Path $_.FullName 'km\ks.h') } |
-            Sort-Object Name | Select-Object -Last 1
-          if (-not $km) { throw "No WDK km headers (km\ks.h) under $kits\Include" }
-          Write-Host "WDK headers found: $($km.FullName)"
-
-          $inf2cat = Get-ChildItem "$kits\bin" -Directory -ErrorAction SilentlyContinue |
-            ForEach-Object { Join-Path $_.FullName 'x86\Inf2Cat.exe' } |
-            Where-Object { Test-Path $_ } | Select-Object -Last 1
-          if (-not $inf2cat) { throw "Inf2Cat not found under $kits\bin" }
-          Write-Host "Inf2Cat found: $inf2cat"
+          $inf2cat = @(Get-ChildItem "$kits\bin" -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Join-Path $_.FullName 'x86\Inf2Cat.exe' } | Where-Object { Test-Path $_ })
+          Write-Host "::warning::inf2cat: $(if ($inf2cat.Count) { $inf2cat -join ' ' } else { 'none' })"
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
 
-      - name: Show toolchain
+      # Builds one project and republishes its errors as check annotations, so
+      # a failed run explains itself without reading the raw log.
+      - name: Build user-mode projects
         shell: pwsh
         run: |
-          Write-Host "--- Windows Kits ---"
-          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' -ErrorAction SilentlyContinue |
-            Select-Object -ExpandProperty Name
-          Write-Host "--- WDK build props ---"
-          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\build' -ErrorAction SilentlyContinue |
-            Select-Object -ExpandProperty Name
+          $log = "$env:RUNNER_TEMP\um.log"
+          $out = & msbuild Win11VirtualCamera\PS3EyeWin11.sln /p:Configuration=Release /p:Platform=x64 /v:minimal /nologo 2>&1
+          $code = $LASTEXITCODE
+          $out | Set-Content $log
+          $out | Write-Host
+          & "$env:GITHUB_WORKSPACE\.github\scripts\report-errors.ps1" $log 'user-mode build'
+          exit $code
 
-      # User-mode pieces (MF virtual camera + registrar). These are expected to
-      # build; if they break, the problem is local to this step.
-      - name: Build user-mode projects
-        run: msbuild Win11VirtualCamera\PS3EyeWin11.sln /p:Configuration=Release /p:Platform=x64 /v:minimal /nologo
-
-      # The driver. This is the step that has never run: expect real errors here
-      # the first time. The log is the whole point of this job.
+      # The step that has never run: expect real errors the first time.
       - name: Build AVStream driver
-        run: msbuild Win11VirtualCamera\KernelDriver\PS3EyeVCamKernel.vcxproj /p:Configuration=Release /p:Platform=x64 /p:SolutionDir=Win11VirtualCamera\ /v:minimal /nologo
+        shell: pwsh
+        run: |
+          $log = "$env:RUNNER_TEMP\driver.log"
+          $out = & msbuild Win11VirtualCamera\KernelDriver\PS3EyeVCamKernel.vcxproj `
+            /p:Configuration=Release /p:Platform=x64 /p:SolutionDir=$(Resolve-Path 'Win11VirtualCamera')\ `
+            /v:minimal /nologo 2>&1
+          $code = $LASTEXITCODE
+          $out | Set-Content $log
+          $out | Write-Host
+          & "$env:GITHUB_WORKSPACE\.github\scripts\report-errors.ps1" $log 'driver build'
+          exit $code
 
       - name: Build capture service
-        run: msbuild MediaFoundationSource\PS3EyeCaptureService.vcxproj /p:Configuration=Release /p:Platform=x64 /p:SolutionDir=MediaFoundationSource\ /v:minimal /nologo
+        shell: pwsh
+        run: |
+          $log = "$env:RUNNER_TEMP\svc.log"
+          $out = & msbuild MediaFoundationSource\PS3EyeCaptureService.vcxproj `
+            /p:Configuration=Release /p:Platform=x64 /p:SolutionDir=$(Resolve-Path 'MediaFoundationSource')\ `
+            /v:minimal /nologo 2>&1
+          $code = $LASTEXITCODE
+          $out | Set-Content $log
+          $out | Write-Host
+          & "$env:GITHUB_WORKSPACE\.github\scripts\report-errors.ps1" $log 'capture service build'
+          exit $code
 
       - name: Make catalog
         shell: pwsh
@@ -93,13 +108,17 @@ jobs:
           $kits = 'C:\Program Files (x86)\Windows Kits\10'
           $inf2cat = Get-ChildItem "$kits\bin" -Directory |
             ForEach-Object { Join-Path $_.FullName 'x86\Inf2Cat.exe' } |
-            Where-Object { Test-Path $_ } | Select-Object -Last 1
-          if (-not $inf2cat) { throw "Inf2Cat not found under $kits\bin" }
+            Where-Object { Test-Path $_ } | Sort-Object | Select-Object -Last 1
+          if (-not $inf2cat) { Write-Host '::error::Inf2Cat not found under Windows Kits\10\bin'; exit 1 }
 
           $out = 'Win11VirtualCamera\bin\x64\Release'
           Copy-Item 'Win11VirtualCamera\KernelDriver\PS3EyeVCamKernel.inf' $out -Force
-          & $inf2cat /driver:$out /os:10_X64 /verbose
-          if ($LASTEXITCODE -ne 0) { throw "Inf2Cat failed with $LASTEXITCODE" }
+          $log = & $inf2cat /driver:$out /os:10_X64 /verbose 2>&1
+          $code = $LASTEXITCODE
+          $log | Write-Host
+          $bad = @($log | Where-Object { $_ -match 'Error|error|missing|not found' })
+          foreach ($b in ($bad | Select-Object -First 8)) { Write-Host "::error::Inf2Cat: $b" }
+          exit $code
 
       # Throwaway certificate. A kernel driver will not load unsigned at all,
       # and test signing accepts a self-signed cert once it is in the stores.
@@ -127,16 +146,17 @@ jobs:
           $root = New-Object System.Security.Cryptography.X509Certificates.X509Store('Root', 'CurrentUser')
           $root.Open('ReadWrite'); $root.Add($cert); $root.Close()
 
-          $ver = (Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Directory |
-                  Sort-Object Name | Select-Object -Last 1).Name
-          $signtool = "C:\Program Files (x86)\Windows Kits\10\bin\$ver\x64\signtool.exe"
-          if (-not (Test-Path $signtool)) { throw "signtool not found at $signtool" }
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Directory |
+            ForEach-Object { Join-Path $_.FullName 'x64\signtool.exe' } |
+            Where-Object { Test-Path $_ } | Sort-Object | Select-Object -Last 1
+          if (-not $signtool) { Write-Host '::error::signtool not found'; exit 1 }
 
           foreach ($f in @("$out\PS3EyeVCamKernel.sys", "$out\PS3EyeVCamKernel.cat")) {
-            & $signtool sign /v /fd SHA256 /sha1 $thumb $f
-            if ($LASTEXITCODE -ne 0) { throw "signtool failed on $f with $LASTEXITCODE" }
+            & $signtool sign /v /fd SHA256 /sha1 $thumb $f 2>&1 | Write-Host
+            if ($LASTEXITCODE -ne 0) { Write-Host "::error::signtool sign failed on $f"; exit 1 }
           }
-          & $signtool verify /v /pa "$out\PS3EyeVCamKernel.cat"
+          & $signtool verify /v /pa "$out\PS3EyeVCamKernel.cat" 2>&1 | Write-Host
+          if ($LASTEXITCODE -ne 0) { Write-Host '::error::signtool verify /pa failed'; exit 1 }
 
       - name: Collect artifacts
         shell: pwsh
@@ -156,14 +176,16 @@ jobs:
           $svc = 'MediaFoundationSource\bin\x64\Release\PS3EyeCaptureService.exe'
           if (Test-Path $svc) { Copy-Item $svc $dest -Force } else { Write-Host "missing: PS3EyeCaptureService.exe" }
 
-          Get-ChildItem $dest | Select-Object Name, Length
+          Get-ChildItem $dest | Select-Object Name, Length | Format-Table | Out-String | Write-Host
 
       # Runs even when a step failed, so a broken build still gives you the
-      # binaries that did get produced plus the log.
+      # binaries that did get produced plus the logs.
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: PS3EyeVCam
-          path: artifacts/
+          path: |
+            artifacts/
+            ${{ runner.temp }}/*.log
           if-no-files-found: warn
