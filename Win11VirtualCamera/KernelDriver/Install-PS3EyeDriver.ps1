@@ -133,6 +133,7 @@ public static class PS3EyeRootDevice
 
     private const int DIF_REGISTERDEVICE = 0x00000019;
     private const int SPDRP_HARDWAREID = 0x00000001;
+    private const int DICD_GENERATE_ID = 0x00000001;
     private const int INSTALLFLAG_FORCE = 0x00000001;
 
     public static string Create(string hardwareId, string deviceDescription, string infPath)
@@ -147,8 +148,13 @@ public static class PS3EyeRootDevice
             SP_DEVINFO_DATA info = new SP_DEVINFO_DATA();
             info.cbSize = Marshal.SizeOf(typeof(SP_DEVINFO_DATA));
 
-            if (!SetupDiCreateDeviceInfo(set, hardwareId, ref mediaClass, deviceDescription,
-                    IntPtr.Zero, 0x00000001, ref info))
+            // DICD_GENERATE_ID takes the device id without the enumerator prefix;
+            // handing it the full instance path fails with 0xE0000205. The node
+            // ends up as ROOT\PS3EyeVCam\0000 with ROOT\PS3EyeVCam as its
+            // hardware id, which is what the INF matches on.
+            string instanceName = hardwareId.Substring(hardwareId.LastIndexOf('\\') + 1);
+            if (!SetupDiCreateDeviceInfo(set, instanceName, ref mediaClass, deviceDescription,
+                    IntPtr.Zero, DICD_GENERATE_ID, ref info))
                 return "SetupDiCreateDeviceInfo failed (" + Marshal.GetLastWin32Error() + ")";
 
             string multiSz = hardwareId + "\0\0";
@@ -221,9 +227,10 @@ function Install-Driver {
     }
 
     try {
-        $device = Get-CimInstance Win32_PnPEntity -Filter ("DeviceID='{0}'" -f $HardwareId.Replace('\', '\\')) -ErrorAction Stop
+        $device = Get-PnpDevice -ErrorAction Stop |
+            Where-Object { $_.InstanceId -like ("{0}*" -f $HardwareId) } | Select-Object -First 1
         if ($device) {
-            Write-Step ("Present: {0} [{1}]" -f $device.Name, $device.Status) 'OK'
+            Write-Step ("Present: {0} [{1}] ({2})" -f $device.FriendlyName, $device.Status, $device.InstanceId) 'OK'
         } else {
             Write-Step 'The device node is registered but not present yet; a reboot finishes the binding.' 'WARN'
         }
@@ -254,7 +261,14 @@ function Get-PublishedDrivers {
 
 function Uninstall-Driver {
     Write-Step ("Removing device {0}..." -f $HardwareId)
-    & pnputil.exe /remove-device "$HardwareId" | ForEach-Object { Write-Step $_ }
+    # The instance id carries a generated suffix, so look it up rather than guess.
+    $instances = @(Get-PnpDevice -ErrorAction SilentlyContinue |
+        Where-Object { $_.InstanceId -like ("{0}*" -f $HardwareId) } |
+        Select-Object -ExpandProperty InstanceId)
+    if (-not $instances) { Write-Step 'No PS3 Eye device node present.' 'WARN' }
+    foreach ($id in $instances) {
+        & pnputil.exe /remove-device "$id" | ForEach-Object { Write-Step $_ }
+    }
 
     Write-Step 'Removing the driver package...'
     $ours = Get-PublishedDrivers | Where-Object {
