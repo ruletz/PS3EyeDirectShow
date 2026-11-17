@@ -210,15 +210,14 @@ static VCAM_STATE g_Vcam;
 // client actually got. Values are written at PASSIVE_LEVEL only.
 //------------------------------------------------------------------------------
 
-#define VCAM_DIAG_COUNT 16
+#define VCAM_DIAG_COUNT 14
 
 static const WCHAR *const g_DiagNames[VCAM_DIAG_COUNT] = {
     L"DiagPinCreate",     L"DiagPinCreateFail", L"DiagSetFormat",
     L"DiagSetFormatFail", L"DiagRun",           L"DiagProcess",
     L"DiagSubFormat",     L"DiagFormatSize",    L"DiagLoaded",
     L"DiagOpen",          L"DiagIntersect",     L"DiagWantSpec",
-    L"DiagWantSize",      L"DiagWantWidth",     L"DiagWantHeight",
-    L"DiagIntersectFail"};
+    L"DiagWantSize",      L"DiagIntersectFail"};
 
 static HANDLE g_DiagKey = NULL;
 static LONG g_Diag[VCAM_DIAG_COUNT];
@@ -900,25 +899,22 @@ static NTSTATUS VcamPinIntersect(PVOID Context, PIRP Irp, PKSP_PIN Pin,
     UNREFERENCED_PARAMETER(Pin);
 
     if (DataRange == NULL || MatchingDataRange == NULL || DataSize == NULL) {
-        VcamDiagBump(15);
+        VcamDiagBump(13);
         return STATUS_INVALID_PARAMETER;
     }
 
     VcamDiagBump(10);
 
-    // Recorded so a refused match says what the client asked for.
+    // Recorded so a refused match says what the client asked for. Only fields
+    // inside the 64-byte KSDATARANGE are read: anything past it depends on a
+    // length the client supplies, and this must not be able to read out of
+    // bounds.
     VcamDiagSet(11, DataRange->Specifier.Data1);
     VcamDiagSet(12, DataRange->FormatSize);
-    if (DataRange->FormatSize >= sizeof(KS_DATARANGE_VIDEO)) {
-        const KS_DATARANGE_VIDEO *range = (const KS_DATARANGE_VIDEO *)DataRange;
-
-        VcamDiagSet(13, (ULONG)range->VideoInfoHeader.bmiHeader.biWidth);
-        VcamDiagSet(14, (ULONG)range->VideoInfoHeader.bmiHeader.biHeight);
-    }
 
     if (!IsEqualGUID(&DataRange->MajorFormat, &kMajorTypeVideo) ||
         !IsEqualGUID(&DataRange->SubFormat, &kSubtypeRgb24)) {
-        VcamDiagBump(15);
+        VcamDiagBump(13);
         return STATUS_NO_MATCH;
     }
 
@@ -930,7 +926,7 @@ static NTSTATUS VcamPinIntersect(PVOID Context, PIRP Irp, PKSP_PIN Pin,
         second = FALSE;
         formatSize = sizeof(KSDATAFORMAT) + sizeof(KS_VIDEOINFOHEADER);
     } else {
-        VcamDiagBump(15);
+        VcamDiagBump(13);
         return STATUS_NO_MATCH;
     }
 
@@ -940,11 +936,11 @@ static NTSTATUS VcamPinIntersect(PVOID Context, PIRP Irp, PKSP_PIN Pin,
         return STATUS_BUFFER_OVERFLOW;
     }
     if (Data == NULL) {
-        VcamDiagBump(15);
+        VcamDiagBump(13);
         return STATUS_INVALID_PARAMETER;
     }
     if (DataBufferSize < formatSize) {
-        VcamDiagBump(15);
+        VcamDiagBump(13);
         return STATUS_BUFFER_TOO_SMALL;
     }
 
