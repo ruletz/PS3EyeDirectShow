@@ -110,106 +110,89 @@ function Get-VcamService([string] $DeviceInstanceId) {
 
 # ------------------------------------------------------- software device ----
 
-# A device node created with SetupDiCreateDeviceInfo is enumerated but nothing
-# runs the install for it: Windows leaves it on the null driver with problem 0,
-# so pnputil, newdev and a rescan all consider it configured. The Software
-# Device API creates a genuinely new devnode, and PnP installs the staged
-# package for it exactly as it would for plugged-in hardware.
-$SwDeviceSource = @'
+# The Software Device API would be the tidy way to do this, but swdevice.dll is
+# not present on every Windows 10 build, so this follows devcon instead: create
+# a root node and let newdev install the staged package on it.
+$RootDeviceSource = @'
 using System;
 using System.Runtime.InteropServices;
-using System.Threading;
 
-public static class PS3EyeSwDevice
+public static class PS3EyeRootDevice
 {
     [StructLayout(LayoutKind.Sequential)]
-    private struct SW_DEVICE_CREATE_INFO
+    public struct SP_DEVINFO_DATA
     {
         public int cbSize;
-        public IntPtr pszInstanceId;
-        public IntPtr pszzHardwareIds;
-        public IntPtr pszzCompatibleIds;
-        public IntPtr pContainerId;
-        public int CapabilityFlags;
-        public IntPtr pszDeviceDescription;
-        public IntPtr pszDeviceLocation;
-        public IntPtr pSecurityDescriptor;
+        public Guid ClassGuid;
+        public int DevInst;
+        public IntPtr Reserved;
     }
 
-    private delegate void CreateCallback(IntPtr swDevice, int createResult, IntPtr instanceId, IntPtr context);
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr SetupDiCreateDeviceInfoList(ref Guid classGuid, IntPtr hwndParent);
 
-    [DllImport("swdevice.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
-    private static extern int SwDeviceCreate(string enumerator, string parentDeviceInstance,
-        ref SW_DEVICE_CREATE_INFO createInfo, int propertyCount, IntPtr properties,
-        CreateCallback callback, IntPtr context, out IntPtr swDevice);
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool SetupDiCreateDeviceInfo(IntPtr deviceInfoSet, string deviceName,
+        ref Guid classGuid, string deviceDescription, IntPtr hwndParent, int creationFlags,
+        ref SP_DEVINFO_DATA deviceInfoData);
 
-    [DllImport("swdevice.dll")]
-    private static extern int SwDeviceSetLifetime(IntPtr swDevice, int lifetime);
+    [DllImport("setupapi.dll", SetLastError = true)]
+    private static extern bool SetupDiSetDeviceRegistryProperty(IntPtr deviceInfoSet,
+        ref SP_DEVINFO_DATA deviceInfoData, int property, byte[] propertyBuffer, int propertyBufferSize);
 
-    [DllImport("swdevice.dll")]
-    private static extern void SwDeviceClose(IntPtr swDevice);
+    [DllImport("setupapi.dll", SetLastError = true)]
+    private static extern bool SetupDiCallClassInstaller(int installFunction, IntPtr deviceInfoSet,
+        ref SP_DEVINFO_DATA deviceInfoData);
 
-    private const int Removable = 0x00000001;
-    private const int SilentInstall = 0x00000002;
-    private const int DriverRequired = 0x00000004;
-    private const int LifetimeParentPresent = 0x00000001;
+    [DllImport("setupapi.dll", SetLastError = true)]
+    private static extern bool SetupDiDestroyDeviceInfoList(IntPtr deviceInfoSet);
 
-    private static IntPtr MultiSz(string value)
+    [DllImport("newdev.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool UpdateDriverForPlugAndPlayDevices(IntPtr hwndParent, string hardwareId,
+        string fullInfPath, int installFlags, out bool rebootRequired);
+
+    private const int DIF_REGISTERDEVICE = 0x00000019;
+    private const int SPDRP_HARDWAREID = 0x00000001;
+    private const int DICD_GENERATE_ID = 0x00000001;
+    private const int INSTALLFLAG_FORCE = 0x00000001;
+
+    // devcon's recipe: a bare device id with DICD_GENERATE_ID, then the same
+    // string as the hardware id so the models line in the INF matches it, then
+    // newdev to install the package on the node that now exists.
+    public static string Create(string hardwareId, string deviceDescription, string infPath)
     {
-        return Marshal.StringToHGlobalUni(value + "\0\0");
-    }
-
-    public static string Create(string enumerator, string instanceName, string hardwareId,
-        string description, out string deviceInstanceId)
-    {
-        deviceInstanceId = "";
-        IntPtr instance = Marshal.StringToHGlobalUni(instanceName);
-        IntPtr hardware = MultiSz(hardwareId);
-        IntPtr compatible = MultiSz(hardwareId);
-        IntPtr desc = Marshal.StringToHGlobalUni(description);
-        IntPtr device = IntPtr.Zero;
-        ManualResetEvent finished = new ManualResetEvent(false);
-        string reported = "";
-
-        CreateCallback callback = delegate(IntPtr handle, int result, IntPtr id, IntPtr context)
-        {
-            if (result == 0 && id != IntPtr.Zero) reported = Marshal.PtrToStringUni(id);
-            finished.Set();
-        };
+        Guid mediaClass = new Guid("4d36e96c-e325-11ce-bfc1-08002be10318");
+        IntPtr set = SetupDiCreateDeviceInfoList(ref mediaClass, IntPtr.Zero);
+        if (set == new IntPtr(-1))
+            return "SetupDiCreateDeviceInfoList failed (" + Marshal.GetLastWin32Error() + ")";
 
         try
         {
-            SW_DEVICE_CREATE_INFO info = new SW_DEVICE_CREATE_INFO();
-            info.cbSize = Marshal.SizeOf(typeof(SW_DEVICE_CREATE_INFO));
-            info.pszInstanceId = instance;
-            info.pszzHardwareIds = hardware;
-            info.pszzCompatibleIds = compatible;
-            info.CapabilityFlags = Removable | SilentInstall | DriverRequired;
-            info.pszDeviceDescription = desc;
+            SP_DEVINFO_DATA info = new SP_DEVINFO_DATA();
+            info.cbSize = Marshal.SizeOf(typeof(SP_DEVINFO_DATA));
 
-            int hr = SwDeviceCreate(enumerator, "HTREE\\ROOT\\0", ref info, 0, IntPtr.Zero,
-                callback, IntPtr.Zero, out device);
-            if (hr < 0)
-                return "SwDeviceCreate failed (0x" + hr.ToString("X8") + ")";
-            if (!finished.WaitOne(30000))
-                return "SwDeviceCreate did not report the device within 30 seconds";
-            GC.KeepAlive(callback);
-            if (device == IntPtr.Zero)
-                return "SwDeviceCreate returned no handle";
+            if (!SetupDiCreateDeviceInfo(set, hardwareId, ref mediaClass, deviceDescription,
+                    IntPtr.Zero, DICD_GENERATE_ID, ref info))
+                return "SetupDiCreateDeviceInfo failed (" + Marshal.GetLastWin32Error() + ")";
 
-            // Keep the device after this process exits; it is removed by
-            // uninstalling rather than by the handle going away.
-            SwDeviceSetLifetime(device, LifetimeParentPresent);
-            SwDeviceClose(device);
-            deviceInstanceId = reported;
-            return "";
+            string multiSz = hardwareId + "\0\0";
+            byte[] buffer = System.Text.Encoding.Unicode.GetBytes(multiSz);
+            if (!SetupDiSetDeviceRegistryProperty(set, ref info, SPDRP_HARDWAREID, buffer, buffer.Length))
+                return "SetupDiSetDeviceRegistryProperty failed (" + Marshal.GetLastWin32Error() + ")";
+
+            if (!SetupDiCallClassInstaller(DIF_REGISTERDEVICE, set, ref info))
+                return "SetupDiCallClassInstaller failed (" + Marshal.GetLastWin32Error() + ")";
+
+            bool reboot = false;
+            if (!UpdateDriverForPlugAndPlayDevices(IntPtr.Zero, hardwareId, infPath,
+                    INSTALLFLAG_FORCE, out reboot))
+                return "UpdateDriverForPlugAndPlayDevices failed (" + Marshal.GetLastWin32Error() + ")";
+
+            return reboot ? "REBOOT" : "";
         }
         finally
         {
-            Marshal.FreeHGlobal(instance);
-            Marshal.FreeHGlobal(hardware);
-            Marshal.FreeHGlobal(compatible);
-            Marshal.FreeHGlobal(desc);
+            SetupDiDestroyDeviceInfoList(set);
         }
     }
 }
@@ -245,8 +228,8 @@ function Install-Driver {
         Write-Step ("pnputil failed with exit code {0}." -f $LASTEXITCODE) 'WARN'
     }
 
-    if (-not ('PS3EyeSwDevice' -as [type])) {
-        Add-Type -TypeDefinition $SwDeviceSource -Language CSharp
+    if (-not ('PS3EyeRootDevice' -as [type])) {
+        Add-Type -TypeDefinition $RootDeviceSource -Language CSharp
     }
 
     $existing = @(Get-VcamDevices)
@@ -255,14 +238,16 @@ function Install-Driver {
     if ($device) {
         Write-Step ("Device already present: {0} ({1})" -f $device.InstanceId, $device.Status)
     } else {
-        Write-Step ("Creating software device {0}..." -f $HardwareId)
-        $reported = ''
-        $result = [PS3EyeSwDevice]::Create('PS3EYE', $InstanceId, $HardwareId, $DeviceDesc, [ref]$reported)
-        if ($result -ne '') {
+        Write-Step ("Creating device node {0}..." -f $HardwareId)
+        $result = [PS3EyeRootDevice]::Create($HardwareId, $DeviceDesc, $inf)
+        if ($result -eq 'REBOOT') {
+            Write-Step 'Driver bound; Windows wants a reboot to finish. No reboot was started.' 'WARN'
+        } elseif ($result -ne '') {
             Write-Step $result 'ERROR'
             return
+        } else {
+            Write-Step 'Device node created and driver bound.'
         }
-        Write-Step ("Windows enumerated {0}." -f $reported)
     }
 
     # PnP installs the staged package for the new node; wait for the driver to
