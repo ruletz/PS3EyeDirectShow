@@ -165,7 +165,8 @@ jobs:
           $code = $LASTEXITCODE
           $log | Write-Host
           $bad = @($log | Where-Object { $_ -match 'Error|error|missing|not found' } |
-            Where-Object { $_ -notmatch 'Inf2Cat: (\S+: )?(Errors|Warnings)' })
+            Where-Object { $_ -notmatch 'Inf2Cat: (\S+: )?(Errors|Warnings)' } |
+            Where-Object { $_ -notmatch '^\s*(Errors|Warnings):?\s*$' })
           foreach ($b in ($bad | Select-Object -First 8)) { Write-Host "::error::Inf2Cat: $b" }
           exit $code
 
@@ -277,7 +278,7 @@ jobs:
 
           # Without the certificate in a trusted root store the only thing that
           # may fail is the chain; a bad signature must still fail the build.
-          if ($text -match 'root certificate which is not trusted') {
+          if ($text -match 'not trusted by the trust provider') {
             Write-Host '::notice::signature is valid; chain ends in the untrusted test certificate'
             exit 0
           }
