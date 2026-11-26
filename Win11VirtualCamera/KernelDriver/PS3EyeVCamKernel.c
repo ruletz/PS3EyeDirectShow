@@ -215,7 +215,7 @@ static VCAM_STATE g_Vcam;
 // client actually got. Values are written at PASSIVE_LEVEL only.
 //------------------------------------------------------------------------------
 
-#define VCAM_DIAG_COUNT 16
+#define VCAM_DIAG_COUNT 18
 
 static const WCHAR *const g_DiagNames[VCAM_DIAG_COUNT] = {
     L"DiagPinCreate",     L"DiagPinCreateFail", L"DiagSetFormat",
@@ -223,7 +223,20 @@ static const WCHAR *const g_DiagNames[VCAM_DIAG_COUNT] = {
     L"DiagSubFormat",     L"DiagFormatSize",    L"DiagLoaded",
     L"DiagOpen",          L"DiagIntersect",     L"DiagWantSpec",
     L"DiagWantSize",      L"DiagIntersectFail", L"DiagConnectStatus",
-    L"DiagReaderEventStatus"};
+    L"DiagReaderEventStatus", L"DiagDeliverStage", L"DiagFrameExtent"};
+
+// DiagDeliverStage records the first check in VcamDeliverFrame that refused a
+// frame. A client that times out with the camera actually streaming needs this:
+// every branch below answers a different question.
+#define VCAM_STAGE_NO_POINTER 1
+#define VCAM_STAGE_BAD_BUFFER 2
+#define VCAM_STAGE_NO_FRAME 3
+#define VCAM_STAGE_SAME_FRAME 4
+#define VCAM_STAGE_BAD_MAGIC 5
+#define VCAM_STAGE_ZERO_COPY 6
+#define VCAM_STAGE_OVER_VIEW 7
+#define VCAM_STAGE_SHORT_BUFFER 8
+#define VCAM_STAGE_DELIVERED 9
 
 static HANDLE g_DiagKey = NULL;
 static LONG g_Diag[VCAM_DIAG_COUNT];
@@ -763,11 +776,13 @@ static NTSTATUS VcamDeliverFrame(PKSPIN Pin, volatile LONG64 *LastFrameNumber) {
     leading = KsPinGetLeadingEdgeStreamPointer(
         Pin, KSSTREAM_POINTER_STATE_LOCKED);
     if (leading == NULL) {
+        VcamDiagSet(16, VCAM_STAGE_NO_POINTER);
         return STATUS_PENDING;
     }
 
     if (g_Vcam.MappedBase == NULL || leading->StreamHeader == NULL ||
         leading->StreamHeader->Data == NULL || g_Vcam.MappedSize == 0) {
+        VcamDiagSet(16, VCAM_STAGE_BAD_BUFFER);
         KsStreamPointerUnlock(leading, FALSE);
         return STATUS_PENDING;
     }
@@ -777,9 +792,21 @@ static NTSTATUS VcamDeliverFrame(PKSPIN Pin, volatile LONG64 *LastFrameNumber) {
 
     // Nothing new since this pin's last delivery, or the header is not ours.
     // The check is per pin: one app consuming frame N must not stop the others
-    // from receiving it.
-    if (frameNumber == 0 || frameNumber == (ULONGLONG)*LastFrameNumber ||
-        header->Magic != PS3EYE_MAGIC) {
+    // from receiving it. The two cases are counted apart: a frame number that
+    // never moves means the writer is not reaching these pages, while a number
+    // that moves but was already handed over is normal between ticks.
+    if (frameNumber == 0) {
+        VcamDiagSet(16, VCAM_STAGE_NO_FRAME);
+        KsStreamPointerUnlock(leading, FALSE);
+        return STATUS_PENDING;
+    }
+    if (header->Magic != PS3EYE_MAGIC) {
+        VcamDiagSet(16, VCAM_STAGE_BAD_MAGIC);
+        KsStreamPointerUnlock(leading, FALSE);
+        return STATUS_PENDING;
+    }
+    if (frameNumber == (ULONGLONG)*LastFrameNumber) {
+        VcamDiagSet(16, VCAM_STAGE_SAME_FRAME);
         KsStreamPointerUnlock(leading, FALSE);
         return STATUS_PENDING;
     }
@@ -789,13 +816,18 @@ static NTSTATUS VcamDeliverFrame(PKSPIN Pin, volatile LONG64 *LastFrameNumber) {
         copySize = PS3EYE_FRAME_SIZE;
     }
     if ((ULONGLONG)g_Vcam.DataOffset + copySize > (ULONGLONG)g_Vcam.MappedSize) {
+        VcamDiagSet(16, VCAM_STAGE_OVER_VIEW);
         KsStreamPointerUnlock(leading, FALSE);
         return STATUS_PENDING;
     }
     if (leading->StreamHeader->FrameExtent < copySize) {
+        VcamDiagSet(16, VCAM_STAGE_SHORT_BUFFER);
+        VcamDiagSet(17, leading->StreamHeader->FrameExtent);
         KsStreamPointerUnlock(leading, FALSE);
         return STATUS_PENDING;
     }
+
+    VcamDiagSet(16, VCAM_STAGE_DELIVERED);
 
     destination = leading->StreamHeader->Data;
     RtlCopyMemory(destination,
