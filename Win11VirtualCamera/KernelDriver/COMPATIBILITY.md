@@ -1,0 +1,136 @@
+# Compatibility and status
+
+What the AVStream camera driver (`PS3EyeVCamKernel.sys`) has actually been run
+against, what it needs to work, and where it stops. Everything below was
+measured; nothing here is inferred from the source.
+
+## Tested configuration
+
+| Component | Value |
+|---|---|
+| Host | Windows 11, VirtualBox 7.1.16 |
+| Guest | Windows 10 Enterprise LTSC 19044 (x64), test signing on |
+| Driver | `PS3EyeVCamKernel.sys` 1.0.0.147, test-signed with the repo certificate |
+| Frame source | `PS3EyeCaptureService.exe` (LocalSystem, session 0), PS3 Eye over WinUSB |
+| Camera | PS3 Eye, USB `1415:2000`, "USB Camera-B4.04.27.1" |
+| Clients | Chrome (`file:///…/cam.html` test page, `getUserMedia`), Media Foundation via the KS proxy |
+
+## What works
+
+- **Enumeration.** Windows publishes `ROOT\PS3EYEVCAM\0000` with FriendlyName
+  *PS3 Eye Camera* under `KSCATEGORY_VIDEO_CAMERA`. Chrome lists it as
+  `PS3 Eye Camera` and `getUserMedia({video: {width: 640, height: 480}})`
+  succeeds with `track.getSettings()` reporting 640x480 at 30 fps.
+- **Pixel data.** The rendered image is a correct, correctly-coloured frame —
+  no stride, BGR/RGB or byte-order problems, and not a black frame
+  (`pixels avg ≈ 95` on the test page).
+- **Format negotiation.** Media Foundation asks for `VIDEOINFOHEADER2` and
+  accepts the single `RGB24` range the driver offers; DirectShow-style
+  `VIDEOINFOHEADER` requests get the same range back.
+- **Streaming state machine.** Pin create → `SetDataFormat` → `KSSTATE_RUN`
+  reaches `VcamDeliverFrame` with a valid buffer: the buffer size matches
+  `FrameExtent`, and frames are delivered when the frame counter moves.
+- **On-demand capture.** The service only captures while a reader exists. A
+  kernel client therefore needs the `PS3EyeKernelReader` event (the driver sets
+  it on pin create and on every RUN), and it works: the service logs
+  `kernelReader=1` while the app is open.
+- **Service restart.** The driver used to keep the section view and the reader
+  event from the previous service instance, which made a restarted service
+  deliver a frame number that never advanced. It now drops both on the first
+  pin and reopens the event on every RUN.
+
+## Requirements
+
+- Windows 10 19044+ or Windows 11, x64.
+- Test signing (development) or an attestation-signed `.sys`/`.cat`.
+- `PS3EyeCaptureService.exe` must be running: it owns the USB device and writes
+  the frames. Without it the camera enumerates and streams black.
+- The PS3 Eye must be bound to WinUSB. While the capture service runs, no other
+  program can own the USB device — including OBS and the DirectShow filter's
+  own USB path. Several *consumers* of the shared section are fine.
+
+## Limits
+
+- **One format:** 640x480 RGB24 at 30 fps. No NV12 (needs a conversion pass in
+  `VcamDeliverFrame`), no other resolutions.
+- **No camera controls.** Gain, exposure, white balance and the LED are not
+  exposed as KS properties; the service sets autogain/AWB itself.
+- **Tearing is possible.** The driver reads the shared frame from a DPC without
+  the user-mode mutex (it cannot take one at DISPATCH_LEVEL) and relies on the
+  frame counter to skip partially written frames.
+- **Two apps can see different frames** of the same 30 fps stream, but each pin
+  tracks its own frame number, so no client starves another. Up to 8 pins.
+
+## Isochronous bandwidth is the real bottleneck
+
+The PS3 Eye is an isochronous USB 2.0 device: 640x480 raw Bayer at 30 fps is
+about 18 MB/s of continuous isochronous traffic. Emulated host controllers do
+not sustain that.
+
+Measured in the VM above, with the driver ticking normally:
+
+| Measurement | Value |
+|---|---|
+| `DiagProcess` (delivery attempts) | ~30/s — the timer and pin callbacks are healthy |
+| `DiagDeliverStage` | `4` (`VCAM_STAGE_SAME_FRAME`) — no new frame exists to deliver |
+| `capture: N frames in 2s` (service log) | **1 frame per 2 s**, then 0 |
+| Chrome `requestVideoFrameCallback` count | 0 new frames in 4 s (still picture) |
+
+So when the picture freezes, the fault is upstream of the driver. Two failure
+modes were observed:
+
+1. **Throttled stream.** The service receives ~0.5 fps instead of 30 fps.
+2. **Stalled stream that never recovers.** After a few hundred frames the
+   isochronous pipes stop completing. `PS3EYECam::getFrame()` then blocks
+   forever, which leaves the service in `STOP_PENDING` (it cannot even be
+   stopped, only killed) and produces no frames at all. Detaching and
+   re-attaching the USB device in VirtualBox brought back one frame every two
+   seconds; only a physical re-plug or a host-side controller reset clears it.
+
+Neither is reachable from the driver: it never touches USB. Expect full-rate
+capture on real hardware with the camera on a real xHCI controller; treat any
+number measured inside a VM as a lower bound.
+
+## Diagnosing a stream that does not start
+
+The driver writes counters to its own service key at PASSIVE_LEVEL
+(`HKLM\SYSTEM\CurrentControlSet\Services\PS3EyeVCamKernel`), readable without
+elevation:
+
+| Value | Meaning |
+|---|---|
+| `DiagLoaded` | `DriverEntry` ran and the device object was created |
+| `DiagOpen` / `DiagIntersect` | device open and format-intersection calls from the client |
+| `DiagSetFormat` / `DiagSetFormatFail` | accepted / refused `SetDataFormat` |
+| `DiagSubFormat`, `DiagFormatSize` | what the client asked for (`0xE436EB7D` = RGB24) |
+| `DiagPinCreate`, `DiagRun` | pin created, pin reached `KSSTATE_RUN` |
+| `DiagProcess` | delivery attempts; a static value means the timer stopped |
+| `DiagConnectStatus` | `ZwOpenSection` result for `PS3EyeSharedFrame` (`0` = OK) |
+| `DiagReaderEventStatus` | `ZwOpenEvent` result for `PS3EyeKernelReader` (`0` = OK) |
+| `DiagDeliverStage` | last branch in `VcamDeliverFrame`: 1 no buffer pointer, 2 bad buffer, 3 frame number 0, 4 same frame, 5 bad magic, 7 outside the view, 8 buffer too small, 9 delivered |
+| `DiagFrameExtent` | the client's `FrameExtent` when stage 8 was hit |
+
+The capture service logs to `%ProgramData%\PS3Eye\capture.log` (a session-0
+service has no console): shared memory creation, reader attach, device count,
+camera init, first frame, capture rate every two seconds with the frame
+counter, client count and kernel-reader state, and camera stop.
+
+## Bugchecks found and fixed during bring-up
+
+Each of these was reproduced in the VM and fixed; the driver has since run for
+hours of Windows uptime without a bugcheck.
+
+| Bugcheck | Where | Cause | Fix |
+|---|---|---|---|
+| `0x7E` | `VcamDeliverFrame+0x1939`, reading `header->FrameNumber` | `ZwMapViewOfSection` maps into the *current process*; the delivery DPC runs in whatever context it lands in | map once with `MmMapViewInSystemSpace` |
+| `0x3B` | `VcamConnect`, reading `header->Magic` | same process-local view, reached from a different process (`ObReferenceObjectByHandle` with a wrong type) | pass `NULL` for the object type after `ZwOpenSection`, unmap with `MmUnmapViewInSystemSpace` |
+| `0x3B` | device create | per-call registry logging built a value name in a fixed stack buffer that was never NUL-terminated | literal names only, counters instead of per-call logging |
+| install failure | `SetupDiSetDeviceRegistryProperty` | property written as ANSI, so the instance path went in as a byte string | `CharSet.Unicode` |
+
+## Related route
+
+The user-mode virtual camera (`Win11VirtualCamera/`, `PS3EyeVCamSource.dll` +
+`MFCreateVirtualCamera`) and this driver share the same frame source and the
+same shared-memory protocol, so they cannot both own the USB device — but they
+are unrelated to each other beyond that: route B does not need Windows 11, COM
+registration or the Frame Server, and route A does not need a driver.

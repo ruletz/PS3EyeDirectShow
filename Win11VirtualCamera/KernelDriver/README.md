@@ -113,16 +113,19 @@ Get-PnpDevice -Class Media | Where-Object { $_.FriendlyName -like '*PS3*' }
 
 In an app, pick **PS3 Eye Camera**. Black frames mean the capture service is not
 running or the camera is held by OBS. Kernel-side logging goes to
-`DbgPrintEx`/DebugView (`PS3EyeVCam:`).
+`DbgPrintEx`/DebugView (`PS3EyeVCam:`). When there is no debugger attached, the
+`Diag*` values under the driver's service key say how far a client got; the list
+of values, and the meaning of each `DiagDeliverStage` code, is in
+`COMPATIBILITY.md`.
 
 ## Test it — the four stages
 
-Do this on a VM or a spare machine. A broken kernel driver bugchecks the host,
-and this code has never been run.
+Do this on a VM or a spare machine. A broken kernel driver bugchecks the host
+(three of them did during bring-up), and the camera's isochronous stream needs a
+real host controller to reach full frame rate — see `COMPATIBILITY.md`.
 
 **Stage 0 - build machine.** Visual Studio 2022 + WDK, x64. Build
-`PS3EyeVCamKernel` from `../PS3EyeWin11.sln`. A first build will report real
-errors; fix them there before touching a test machine.
+`PS3EyeVCamKernel` from `../PS3EyeWin11.sln`.
 
 **Stage 1 - VM that survives mistakes.** Hyper-V or VMware, Windows 10 or 11,
 checkpoint taken first, kernel debugging enabled:
@@ -182,25 +185,31 @@ and `ffmpeg`) and check that neither stalls and both keep updating.
 
 ## Status — read this before trusting the driver
 
-- **Never compiled and never loaded.** Every API signature, struct member and
-  GUID below was checked against the shipped `ks.h`/`ksmedia.h`, but no compiler
-  has seen this file. Treat the first `msbuild` run as the real review.
-- Fixed after that header review (each of these was a build break or a
-  bugcheck): wrong `KsCreateFilterFactory` call (it is `NTSTATUS`, takes a
-  `PDEVICE_OBJECT` and 7 arguments) — the factory is now created by AVStream
-  from `KSDEVICE_DESCRIPTOR` instead; `KSPIN_DISPATCH.SetStatus` does not exist
-  (it is `SetDeviceState`); `KSPIN_DESCRIPTOR_EX.PinDescriptor` is a struct by
-  value, not a pointer; `KSFILTER_DESCRIPTOR` has no `DescriptorId` or
+- **Builds, loads, enumerates and streams.** Verified in a Windows 10 19044 VM
+  with test signing; see `COMPATIBILITY.md` for the tested configuration, the
+  measurements and the limits. Chrome lists *PS3 Eye Camera* and renders 640x480
+  frames through Media Foundation.
+- Fixed during bring-up (each was a build break or an observed bugcheck): wrong
+  `KsCreateFilterFactory` call (it is `NTSTATUS`, takes a `PDEVICE_OBJECT` and 7
+  arguments) — the factory is now created by AVStream from
+  `KSDEVICE_DESCRIPTOR` instead; `KSPIN_DISPATCH.SetStatus` does not exist (it is
+  `SetDeviceState`); `KSPIN_DESCRIPTOR_EX.PinDescriptor` is a struct by value,
+  not a pointer; `KSFILTER_DESCRIPTOR` has no `DescriptorId` or
   `ConnectionDescriptors` but **requires** `PinDescriptorSize` (omitting it
   makes AVStream walk the descriptor array off the end); the missing
   `KS_DATARANGE_VIDEO.VideoInfoHeader` (no format would ever be offered);
   `KSMEDIUM` is not a type (`KSPIN_MEDIUM`) and the medium-set GUID was wrong;
   `KeInitializeTimer` cannot be used with `KeSetTimerEx` (needs
-  `KeInitializeTimerEx`); and `VcamPinClose` could unmap the shared section
-  while a DPC was still reading it, now `KeFlushQueuedDpcs()` before unmap.
+  `KeInitializeTimerEx`); `VcamPinClose` could unmap the shared section while a
+  DPC was still reading it, now `KeFlushQueuedDpcs()` before unmap.
+- Fixed while streaming (all three bugchecked the machine, see
+  `COMPATIBILITY.md`): the frame view is mapped with `MmMapViewInSystemSpace`
+  because a process-local `ZwMapViewOfSection` is only valid in the context that
+  mapped it, and the delivery DPC runs anywhere; the per-call registry logging
+  that faulted on an unterminated value name is gone; and a restarted capture
+  service is picked up again instead of leaving the driver on a stale section
+  and reader event.
 - Still open by design:
-  - `AllocatorFraming` is `NULL`. Some clients want an explicit framing range;
-    if a client refuses to render, this is the first thing to add.
   - Single format: 640x480 RGB24 @ 30 fps. NV12 needs a conversion pass in
     `VcamDeliverFrame` and is not implemented.
   - Camera controls (gain, exposure, white balance, LED) are not exposed as KS
