@@ -91,6 +91,21 @@ Neither is reachable from the driver: it never touches USB. Expect full-rate
 capture on real hardware with the camera on a real xHCI controller; treat any
 number measured inside a VM as a lower bound.
 
+Two more things worth knowing when the guest is virtual:
+
+- **Keep the USB 3.0 (xHCI) controller.** Switching the VM to the USB 2.0 (EHCI)
+  controller makes the camera enumerate and `init()` succeed — control transfers
+  work — but the isochronous IN endpoints never complete, so not a single frame
+  arrives. On xHCI the same VM delivered a 519-frame burst (~17 s at 30 fps)
+  before stalling.
+- **A stalled stream does not recover in the guest.** `pnputil /restart-device`
+  reports success, detaching and re-attaching the USB device in the hypervisor
+  does not help, and the camera keeps its LED lit because it still believes it
+  is streaming. Only a physical unplug/replug (a real VBUS cycle) clears it. If
+  the capture service was running at the time, kill it first: `PS3EYECam::stop()`
+  waits for the stuck transfer thread and the service stays in `STOP_PENDING`
+  until the process is terminated.
+
 ## Diagnosing a stream that does not start
 
 The driver writes counters to its own service key at PASSIVE_LEVEL
