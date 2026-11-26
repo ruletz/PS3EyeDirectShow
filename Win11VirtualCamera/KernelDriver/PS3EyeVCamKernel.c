@@ -1,12 +1,12 @@
 // PS3EyeVCamKernel.c
 // Minimal AVStream (KS) camera minidriver for the PS3 Eye.
 //
-// State: compiles with the WDK, loads on Windows 10 22H2 with `bcdedit /set
-// testsigning on` plus the build's test certificate trusted, and registers its
-// device node and pin descriptor (KS property queries on the pin succeed).
-// Open issue: Media Foundation opens the device and receives a successful data
-// intersection, but has not yet been observed creating a pin instance - see
-// "Status" in README.md.
+// State: compiles with the WDK, loads on Windows 10 21H2 with `bcdedit /set
+// testsigning on` plus the build's test certificate trusted, registers its
+// device node and pin descriptor, and a browser (Chrome/Chromium through Media
+// Foundation) opens the camera, negotiates RGB24 and runs the pin. Frames reach
+// the pin only while PS3EyeCaptureService is running - see "Status" in
+// README.md.
 //
 // This is the low-level route: instead of the Windows 11 virtual camera API it
 // creates a real camera device node (root-enumerated, KSCATEGORY_VIDEO_CAMERA),
@@ -267,6 +267,22 @@ static NTSTATUS VcamDeviceCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 // Shared memory access (PASSIVE_LEVEL only)
 //------------------------------------------------------------------------------
 
+// The frame view has to live in the system address space. ZwMapViewOfSection
+// maps into the *current* process, and this runs in the context of whichever
+// app opened the pin - so the base would be a user-mode address that only that
+// app can resolve. The timer DPC reads the view from the System process and
+// faulted on exactly that (bugcheck 0x7E, reading header->FrameNumber at
+// PS3EyeVCamKernel+0x1939). Attaching to the system process first puts the view
+// somewhere every context can reach it, and keeps a client process from
+// mapping driver-owned pages into its own address space.
+static VOID VcamAttachToSystem(KAPC_STATE *ApcState) {
+    KeStackAttachProcess(PsInitialSystemProcess, ApcState);
+}
+
+static VOID VcamDetachFromSystem(KAPC_STATE *ApcState) {
+    KeUnstackDetachProcess(ApcState);
+}
+
 static VOID VcamDisconnect(VOID) {
     if (g_Vcam.ReaderEvent != NULL) {
         // Tell the service the last reader is gone so it can park the camera.
@@ -275,7 +291,12 @@ static VOID VcamDisconnect(VOID) {
         g_Vcam.ReaderEvent = NULL;
     }
     if (g_Vcam.MappedBase != NULL) {
+        KAPC_STATE apcState;
+
+        // Unmap in the same process the view was created in (see VcamConnect).
+        VcamAttachToSystem(&apcState);
         ZwUnmapViewOfSection(ZwCurrentProcess(), g_Vcam.MappedBase);
+        VcamDetachFromSystem(&apcState);
         g_Vcam.MappedBase = NULL;
         g_Vcam.MappedSize = 0;
     }
@@ -346,9 +367,17 @@ static NTSTATUS VcamConnect(VOID) {
         return status;
     }
 
-    status = ZwMapViewOfSection(g_Vcam.SectionHandle, ZwCurrentProcess(),
-                                &g_Vcam.MappedBase, 0, 0, NULL, &viewSize,
-                                ViewUnmap, 0, PAGE_READONLY);
+    {
+        KAPC_STATE apcState;
+
+        // Map into the system process, not the caller's: the view is read from
+        // the timer DPC, which always runs in the System process.
+        VcamAttachToSystem(&apcState);
+        status = ZwMapViewOfSection(g_Vcam.SectionHandle, ZwCurrentProcess(),
+                                    &g_Vcam.MappedBase, 0, 0, NULL, &viewSize,
+                                    ViewUnmap, 0, PAGE_READONLY);
+        VcamDetachFromSystem(&apcState);
+    }
     if (!NT_SUCCESS(status)) {
         ZwClose(g_Vcam.SectionHandle);
         g_Vcam.SectionHandle = NULL;
