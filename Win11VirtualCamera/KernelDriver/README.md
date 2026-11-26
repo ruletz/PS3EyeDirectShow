@@ -120,6 +120,10 @@ of values, and the meaning of each `DiagDeliverStage` code, is in
 
 ## Test it — the four stages
 
+For a machine you care about, `REAL-HARDWARE.md` has the ordered procedure:
+safety net, test-signing reboots, install, what the frame-rate log must say, and
+how to roll back. The stages below are the diagnostic detail behind it.
+
 Do this on a VM or a spare machine. A broken kernel driver bugchecks the host
 (three of them did during bring-up), and the camera's isochronous stream needs a
 real host controller to reach full frame rate — see `COMPATIBILITY.md`.
