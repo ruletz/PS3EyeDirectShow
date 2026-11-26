@@ -97,6 +97,9 @@ void CaptureLoop() {
   QueryPerformanceFrequency(&perfFreq);
   QueryPerformanceCounter(&startTime);
 
+  LARGE_INTEGER rateStart = startTime, rateTime;
+  int framesThisSecond = 0;
+
   int noClientFrames = 0;
 
   auto initCamera = [&]() -> bool {
@@ -148,9 +151,25 @@ void CaptureLoop() {
     }
 
     camera->getFrame(frameBuffer.data());
+    framesThisSecond++;
 
     if (sharedMemory.GetFrameNumber() == 0)
       ServiceLog("first frame captured\n");
+
+    // Report the rate the camera actually delivers at. Frames reaching the
+    // section at 30 fps while an app shows a still picture point at the reader;
+    // a low number here points at the USB side (the PS3 Eye is isochronous, and
+    // an emulated host controller can starve it) rather than at the driver.
+    QueryPerformanceCounter(&rateTime);
+    if (rateTime.QuadPart - rateStart.QuadPart > perfFreq.QuadPart * 2) {
+      ServiceLog("capture: %d frames in 2s, frameNumber=%llu, clients=%ld, kernelReader=%d\n",
+                 framesThisSecond,
+                 (unsigned long long)sharedMemory.GetFrameNumber(),
+                 sharedMemory.GetClientCount(),
+                 sharedMemory.HasKernelReader() ? 1 : 0);
+      framesThisSecond = 0;
+      rateStart = rateTime;
+    }
 
     QueryPerformanceCounter(&currentTime);
     UINT64 timestamp =
