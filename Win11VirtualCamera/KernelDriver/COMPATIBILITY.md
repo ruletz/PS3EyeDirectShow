@@ -8,7 +8,7 @@ measured; nothing here is inferred from the source.
 
 | Component | Value |
 |---|---|
-| Host | Windows 11, VirtualBox 7.1.16 and 7.2.22 |
+| Host | Windows 11, VirtualBox 7.1.16 and 7.2.22 (isochronous streaming needs `hypervisorlaunchtype off`) |
 | Guest | Windows 10 Enterprise LTSC 19044 (x64), test signing on |
 | Driver | `PS3EyeVCamKernel.sys` 1.0.0.147, test-signed with the repo certificate |
 | Frame source | `PS3EyeCaptureService.exe` (LocalSystem, session 0), PS3 Eye over WinUSB |
@@ -126,12 +126,19 @@ Two more things worth knowing when the guest is virtual:
   immediately after one session started, after which the stream never recovered.
   Treat the VM as a place to prove enumeration, the driver's device interface
   and the connect/deliver plumbing — not to measure frame rate.
-- **The host hypervisor is a second ceiling.** This VM ran with VirtualBox in
-  NEM mode, because the host has VirtualMachinePlatform/WSL enabled and VBS
-  active, so VirtualBox is itself a guest of the Windows hypervisor and gets
-  imprecise timing for emulated transfers. Upgrading 7.1.16 → 7.2.22 changed
-  nothing; neither did xHCI vs EHCI. If a VM is the only option, the thing to
-  try next is a host without an outer hypervisor, not a newer VirtualBox.
+- **The outer Windows hypervisor breaks isochronous passthrough, and turning it
+  off fixes it.** With VirtualBox running in NEM mode (the host had
+  VirtualMachinePlatform/WSL enabled and VBS active, so VirtualBox was a guest of
+  the Windows hypervisor) the camera produced **zero** frames on either USB
+  controller, through any number of device resets and VBUS cycles, on both
+  VirtualBox 7.1.16 and 7.2.22. After
+  `bcdedit /set {current} hypervisorlaunchtype off` and a reboot — VirtualBox then
+  logging `HM: Using VT-x implementation 3.0` instead of NEM — the same VM, same
+  guest, same driver streamed real frames immediately: **35–43 frames per 2 s
+  (~18–21 fps)**, `DiagDeliverStage` reporting delivered, and a correct 640x480
+  image in Chrome. So the emulated-controller ceiling is real but far higher than
+  the old measurements suggested; those were measuring the outer hypervisor, not
+  VirtualBox or this driver.
 - **A stalled stream does not recover in the guest.** If the stream dies while
   the capture service is running, `PS3EYECam::stop()` waits on the stuck
   transfer thread and the service sits in `STOP_PENDING` until the process is
