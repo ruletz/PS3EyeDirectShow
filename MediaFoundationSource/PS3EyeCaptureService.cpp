@@ -22,6 +22,17 @@ static SERVICE_STATUS g_serviceStatus = {0};
 static SERVICE_STATUS_HANDLE g_statusHandle = nullptr;
 static std::atomic<bool> g_running(true);
 
+// Watchdog state. `getFrame` waits for a frame with no timeout, so a stream that
+// dies (cable pulled, camera wedged) parks the capture thread inside it forever:
+// the service then sits in STOP_PENDING and only taskkill clears it. A separate
+// thread watches this timestamp and restarts the process instead. It has to exit
+// rather than reinitialise, because the camera thread cannot be recovered and
+// PS3EYECam::stop() waits on that same stuck thread.
+static std::atomic<UINT64> g_lastFrameTaken{0};  // QPC reading, 0 = idle
+static std::atomic<int> g_framesSeen(0);
+static std::atomic<bool> g_captureActive(false);
+static const double kStallSeconds = 10.0;
+
 // The service runs in session 0 with no console, and a camera that fails to
 // open leaves the driver's pin waiting forever, so note the milestones in a
 // file next to the machine's program data.
@@ -87,10 +98,18 @@ void WINAPI ServiceCtrlHandler(DWORD ctrl) {
 // exercise. Setting PS3EYE_SYNTHETIC=1 in the machine environment makes the
 // service publish a moving test pattern at the camera's frame rate instead of
 // opening the camera, so everything downstream can be verified on its own.
-static bool SyntheticCaptureEnabled() {
+// 0 = off, 1 = publish the pattern, 2 = publish 30 frames and then stop, which
+// exercises the stall watchdog without touching the camera or the device.
+static int SyntheticMode() {
   wchar_t value[8];
   DWORD length = GetEnvironmentVariableW(L"PS3EYE_SYNTHETIC", value, 8);
-  return length > 0 && value[0] == L'1';
+  if (length == 0)
+    return 0;
+  if (value[0] == L'1')
+    return 1;
+  if (_wcsicmp(value, L"stall") == 0)
+    return 2;
+  return 0;
 }
 
 // Moving gradient plus a scrolling bar: a frozen frame and a moving one look
@@ -129,9 +148,26 @@ void CaptureLoop() {
   int framesThisSecond = 0;
 
   int noClientFrames = 0;
-  const bool synthetic = SyntheticCaptureEnabled();
+  const int synthetic = SyntheticMode();
   UINT32 syntheticIndex = 0;
   auto nextTick = std::chrono::steady_clock::now();
+
+  auto noteFrame = [&]() {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    g_lastFrameTaken.store((UINT64)now.QuadPart);
+    g_framesSeen.fetch_add(1);
+  };
+
+  // Arms the stall clock. Called by both frame sources: a camera that never
+  // delivers must be caught too, not just one that stops mid-stream.
+  auto armStallClock = [&]() {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    g_framesSeen.store(0);
+    g_lastFrameTaken.store((UINT64)now.QuadPart);
+    g_captureActive.store(true);
+  };
 
   auto initCamera = [&]() -> bool {
     if (cameraActive)
@@ -139,6 +175,7 @@ void CaptureLoop() {
     if (synthetic) {
       ServiceLog("synthetic capture: no camera opened\n");
       cameraActive = true;
+      armStallClock();
       return true;
     }
     const auto &devices = ps3eye::PS3EYECam::getDevices(true);
@@ -155,6 +192,7 @@ void CaptureLoop() {
       return false;
     }
     ServiceLog("camera started (init ok)\n");
+    armStallClock();
     camera->setAutogain(true);
     camera->setAutoWhiteBalance(true);
     camera->setFlip(false, true);
@@ -163,11 +201,38 @@ void CaptureLoop() {
     return true;
   };
 
+  std::thread watchdog([&]() {
+    LARGE_INTEGER freq;
+    QueryPerformanceFrequency(&freq);
+    while (g_running) {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      if (!g_captureActive.load())
+        continue;
+      UINT64 last = g_lastFrameTaken.load();
+      if (last == 0)
+        continue;
+      LARGE_INTEGER now;
+      QueryPerformanceCounter(&now);
+      double idle = (double)((UINT64)now.QuadPart - last) / (double)freq.QuadPart;
+      if (idle < kStallSeconds)
+        continue;
+      ServiceLog("capture stalled %.0f s after %d frames (kernelReader=%d): "
+                 "restarting the service process\n",
+                 idle, g_framesSeen.load(),
+                 sharedMemory.HasKernelReader() ? 1 : 0);
+      // The service control manager's recovery actions restart this service
+      // (installed with --install); exiting is the only way out of a blocked
+      // capture thread.
+      ExitProcess(1);
+    }
+  });
+
   auto stopCamera = [&]() {
     if (!cameraActive)
       return;
     if (synthetic) {
       cameraActive = false;
+      g_captureActive.store(false);
       ServiceLog("synthetic capture stopped\n");
       return;
     }
@@ -175,6 +240,7 @@ void CaptureLoop() {
       camera->stop();
     camera.reset();
     cameraActive = false;
+    g_captureActive.store(false);
     ServiceLog("camera stopped\n");
   };
 
@@ -198,6 +264,10 @@ void CaptureLoop() {
     } else {
       camera->getFrame(frameBuffer.data());
     }
+    // In stall-simulation mode the loop keeps running but no longer reports
+    // frames, so the watchdog sees the same silence a dead camera produces.
+    if (!(synthetic == 2 && syntheticIndex > 30))
+      noteFrame();
     framesThisSecond++;
 
     if (sharedMemory.GetFrameNumber() == 0)
@@ -237,6 +307,9 @@ void CaptureLoop() {
   }
 
   stopCamera();
+  g_captureActive.store(false);
+  if (watchdog.joinable())
+    watchdog.join();
   sharedMemory.Close();
 }
 
@@ -280,6 +353,21 @@ bool InstallService() {
     CloseServiceHandle(scm);
     return false;
   }
+
+  // Recovery actions: the stall watchdog ends the process on purpose, and this is
+  // what brings the service back. Capped at three restarts per day so a camera
+  // that is really gone (cable out, dead port) stops churning instead of
+  // restarting forever - the SCM gives up and the service stays stopped.
+  SC_ACTION actions[3];
+  for (int i = 0; i < 3; ++i) {
+    actions[i].Type = SC_ACTION_RESTART;
+    actions[i].Delay = 5000;
+  }
+  SERVICE_FAILURE_ACTIONSW failureActions = {};
+  failureActions.dwResetPeriod = 24 * 60 * 60;
+  failureActions.cActions = 3;
+  failureActions.lpsaActions = actions;
+  ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, &failureActions);
 
   // Start immediately
   StartServiceW(svc, 0, nullptr);

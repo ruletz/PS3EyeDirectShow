@@ -139,6 +139,12 @@ Expected behaviour worth checking explicitly, because the VM could not:
   is live.
 - **Two apps at once.** Open the camera in two clients; both keep updating and
   neither starves the other.
+- **Pulling the cable mid-stream.** Expected: after ~10 s of silence the service
+  logs `capture stalled … : restarting the service process` and the SCM brings
+  it back within 5 s of the app being reopened. If instead the service sits in
+  `STOP_PENDING` forever, the installed build predates the watchdog — reinstall
+  with `PS3EyeCaptureService.exe --install`, which also registers the recovery
+  actions (three restarts per 24 h).
 
 ## 6. If it bugchecks
 

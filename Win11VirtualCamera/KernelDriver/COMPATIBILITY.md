@@ -59,6 +59,27 @@ driver reported a delivered frame, and Chrome's test page painted
 moving pattern. That isolates a frame-rate problem to the USB side, because the
 same build delivers 30 fps when the source is not the camera.
 
+## When the stream dies
+
+`PS3EYECam::getFrame()` waits for a frame with no timeout, so a camera that stops
+mid-stream (cable pulled, port wedged) parks the capture thread inside it for
+ever: the service sits in `STOP_PENDING` and only `taskkill` clears it, with the
+camera's LED still lit. The service now watches for that and gives up on the
+process instead:
+
+- A watchdog thread checks the last frame time once a second. After **10 s** of
+  silence while a pin is open it logs
+  `capture stalled 11 s after 30 frames (kernelReader=1): restarting the service process`
+  and calls `ExitProcess(1)` — the only way out of a blocked capture thread,
+  since `stop()` waits on that same thread.
+- `--install` registers SCM recovery actions: restart after 5 s, three attempts
+  per 24 h. A camera that is genuinely gone therefore stops churning instead of
+  restarting forever, and a camera that was only interrupted comes back on its
+  own once it is delivering again.
+- Verified in the VM with the synthetic source in `stall` mode (30 frames, then
+  silence): the log line above, service `Stopped`, then `Running` with a new PID
+  and a fresh `start: shared memory created` 5 s later.
+
 ## Requirements
 
 - Windows 10 19044+ or Windows 11, x64.
