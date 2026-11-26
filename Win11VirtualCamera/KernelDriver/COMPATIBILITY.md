@@ -185,6 +185,13 @@ elevation:
 | `DiagDeliverStage` | last branch in `VcamDeliverFrame`: 1 no buffer pointer, 2 bad buffer, 3 frame number 0, 4 same frame, 5 bad magic, 7 outside the view, 8 buffer too small, 9 delivered |
 | `DiagFrameExtent` | the client's `FrameExtent` when stage 8 was hit |
 
+**Before blaming the driver, check that nothing else already holds the camera.**
+An earlier copy of the capture service installed on the *other* machine (or the
+host, if you are testing in a VM) keeps the device open: the LED stays lit, the
+VM cannot attach the device properly, and the guest sees no frames. Both sides
+run the same service name, so `sc query PS3EyeCaptureService` on the side you
+are *not* testing is a one-line answer.
+
 The capture service logs to `%ProgramData%\PS3Eye\capture.log` (a session-0
 service has no console): shared memory creation, reader attach, device count,
 camera init, first frame, capture rate every two seconds with the frame
