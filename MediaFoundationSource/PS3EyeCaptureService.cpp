@@ -81,6 +81,34 @@ void WINAPI ServiceCtrlHandler(DWORD ctrl) {
   }
 }
 
+// Test aid. A virtual machine can pass the camera through but its emulated host
+// controller never completes the isochronous transfers, which leaves the rest of
+// the path (shared section, Media Foundation source, kernel camera) impossible to
+// exercise. Setting PS3EYE_SYNTHETIC=1 in the machine environment makes the
+// service publish a moving test pattern at the camera's frame rate instead of
+// opening the camera, so everything downstream can be verified on its own.
+static bool SyntheticCaptureEnabled() {
+  wchar_t value[8];
+  DWORD length = GetEnvironmentVariableW(L"PS3EYE_SYNTHETIC", value, 8);
+  return length > 0 && value[0] == L'1';
+}
+
+// Moving gradient plus a scrolling bar: a frozen frame and a moving one look
+// different both to a screenshot and to the page's painted counter.
+static void FillSyntheticFrame(uint8_t *pixels, UINT32 index) {
+  const UINT32 bar = (index * 8) % PS3EYE_WIDTH;
+  for (UINT32 y = 0; y < PS3EYE_HEIGHT; ++y) {
+    uint8_t *row = pixels + y * PS3EYE_WIDTH * PS3EYE_BYTES_PER_PIXEL;
+    for (UINT32 x = 0; x < PS3EYE_WIDTH; ++x) {
+      UINT32 dx = (x > bar) ? (x - bar) : (bar - x);
+      bool inBar = dx < 40;
+      row[x * 3 + 0] = inBar ? 255 : (uint8_t)(x * 255 / PS3EYE_WIDTH);
+      row[x * 3 + 1] = inBar ? 255 : (uint8_t)(y * 255 / PS3EYE_HEIGHT);
+      row[x * 3 + 2] = inBar ? 0 : (uint8_t)((index * 3) & 0xFF);
+    }
+  }
+}
+
 void CaptureLoop() {
   PS3EyeSharedMemoryServer sharedMemory;
   if (!sharedMemory.Create()) {
@@ -101,10 +129,18 @@ void CaptureLoop() {
   int framesThisSecond = 0;
 
   int noClientFrames = 0;
+  const bool synthetic = SyntheticCaptureEnabled();
+  UINT32 syntheticIndex = 0;
+  auto nextTick = std::chrono::steady_clock::now();
 
   auto initCamera = [&]() -> bool {
     if (cameraActive)
       return true;
+    if (synthetic) {
+      ServiceLog("synthetic capture: no camera opened\n");
+      cameraActive = true;
+      return true;
+    }
     const auto &devices = ps3eye::PS3EYECam::getDevices(true);
     if (devices.empty()) {
       ServiceLog("reader attached but no PS3 Eye found on USB\n");
@@ -130,6 +166,11 @@ void CaptureLoop() {
   auto stopCamera = [&]() {
     if (!cameraActive)
       return;
+    if (synthetic) {
+      cameraActive = false;
+      ServiceLog("synthetic capture stopped\n");
+      return;
+    }
     if (camera && camera->isStreaming())
       camera->stop();
     camera.reset();
@@ -145,12 +186,18 @@ void CaptureLoop() {
       continue;
     }
 
-    if (!camera || !camera->isStreaming()) {
+    if (!synthetic && (!camera || !camera->isStreaming())) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
       continue;
     }
 
-    camera->getFrame(frameBuffer.data());
+    if (synthetic) {
+      nextTick += std::chrono::milliseconds(1000 / PS3EYE_FPS);
+      std::this_thread::sleep_until(nextTick);
+      FillSyntheticFrame(frameBuffer.data(), syntheticIndex++);
+    } else {
+      camera->getFrame(frameBuffer.data());
+    }
     framesThisSecond++;
 
     if (sharedMemory.GetFrameNumber() == 0)

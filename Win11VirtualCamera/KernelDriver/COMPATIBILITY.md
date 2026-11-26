@@ -8,7 +8,7 @@ measured; nothing here is inferred from the source.
 
 | Component | Value |
 |---|---|
-| Host | Windows 11, VirtualBox 7.1.16 |
+| Host | Windows 11, VirtualBox 7.1.16 and 7.2.22 |
 | Guest | Windows 10 Enterprise LTSC 19044 (x64), test signing on |
 | Driver | `PS3EyeVCamKernel.sys` 1.0.0.147, test-signed with the repo certificate |
 | Frame source | `PS3EyeCaptureService.exe` (LocalSystem, session 0), PS3 Eye over WinUSB |
@@ -37,7 +37,27 @@ measured; nothing here is inferred from the source.
 - **Service restart.** The driver used to keep the section view and the reader
   event from the previous service instance, which made a restarted service
   deliver a frame number that never advanced. It now drops both on the first
-  pin and reopens the event on every RUN.
+  pin and reopens the event on every RUN. Verified with frames flowing: with a
+  client open, the service was killed and restarted, the client was closed and
+  reopened, and the new session reconnected on its own — `DiagRun` went 2 → 3,
+  `DiagDeliverStage` returned to `DELIVERED`, and the page resumed painting at
+  30 fps without the driver being reloaded or the device touched.
+
+## Verifying without a working USB stream
+
+The path downstream of USB can be checked on its own, which is worth having
+when the machine cannot pass isochronous transfers through (see below). Set the
+machine environment variable `PS3EYE_SYNTHETIC=1` and restart the capture
+service: it publishes a moving test pattern at 640x480x30 instead of opening the
+camera, and logs `synthetic capture: no camera opened` so the log never leaves
+doubt about which source is in use. Everything after that point is real — the
+shared section, the kernel driver, Media Foundation, the browser.
+
+Measured that way in the VM: the service wrote `61 frames in 2s` (~30 fps), the
+driver reported a delivered frame, and Chrome's test page painted
+`OK 640x480 fps=30 painted=100 secs=4.0`, `pixels avg=166.3` with a visibly
+moving pattern. That isolates a frame-rate problem to the USB side, because the
+same build delivers 30 fps when the source is not the camera.
 
 ## Requirements
 
@@ -106,6 +126,12 @@ Two more things worth knowing when the guest is virtual:
   immediately after one session started, after which the stream never recovered.
   Treat the VM as a place to prove enumeration, the driver's device interface
   and the connect/deliver plumbing — not to measure frame rate.
+- **The host hypervisor is a second ceiling.** This VM ran with VirtualBox in
+  NEM mode, because the host has VirtualMachinePlatform/WSL enabled and VBS
+  active, so VirtualBox is itself a guest of the Windows hypervisor and gets
+  imprecise timing for emulated transfers. Upgrading 7.1.16 → 7.2.22 changed
+  nothing; neither did xHCI vs EHCI. If a VM is the only option, the thing to
+  try next is a host without an outer hypervisor, not a newer VirtualBox.
 - **A stalled stream does not recover in the guest.** If the stream dies while
   the capture service is running, `PS3EYECam::stop()` waits on the stuck
   transfer thread and the service sits in `STOP_PENDING` until the process is
