@@ -215,14 +215,15 @@ static VCAM_STATE g_Vcam;
 // client actually got. Values are written at PASSIVE_LEVEL only.
 //------------------------------------------------------------------------------
 
-#define VCAM_DIAG_COUNT 14
+#define VCAM_DIAG_COUNT 16
 
 static const WCHAR *const g_DiagNames[VCAM_DIAG_COUNT] = {
     L"DiagPinCreate",     L"DiagPinCreateFail", L"DiagSetFormat",
     L"DiagSetFormatFail", L"DiagRun",           L"DiagProcess",
     L"DiagSubFormat",     L"DiagFormatSize",    L"DiagLoaded",
     L"DiagOpen",          L"DiagIntersect",     L"DiagWantSpec",
-    L"DiagWantSize",      L"DiagIntersectFail"};
+    L"DiagWantSize",      L"DiagIntersectFail", L"DiagConnectStatus",
+    L"DiagReaderEventStatus"};
 
 static HANDLE g_DiagKey = NULL;
 static LONG g_Diag[VCAM_DIAG_COUNT];
@@ -315,6 +316,7 @@ static VOID VcamEnsureReaderEvent(VOID) {
     PVOID eventObject = NULL;
 
     if (g_Vcam.ReaderEvent != NULL) {
+        VcamDiagSet(15, 0);
         KeSetEvent(g_Vcam.ReaderEvent, IO_NO_INCREMENT, FALSE);
         return;
     }
@@ -324,7 +326,10 @@ static VOID VcamEnsureReaderEvent(VOID) {
                                OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL,
                                NULL);
 
+    // Recorded as-is so a service that never sees the event can be told apart
+    // from a driver that never found it.
     status = ZwOpenEvent(&handle, EVENT_MODIFY_STATE, &attributes);
+    VcamDiagSet(15, (ULONG)status);
     if (!NT_SUCCESS(status)) {
         return;
     }
@@ -341,7 +346,7 @@ static VOID VcamEnsureReaderEvent(VOID) {
     KeSetEvent(g_Vcam.ReaderEvent, IO_NO_INCREMENT, FALSE);
 }
 
-static NTSTATUS VcamConnect(VOID) {
+static NTSTATUS VcamConnectWorker(VOID) {
     UNICODE_STRING sectionName;
     OBJECT_ATTRIBUTES attributes;
     PVOID sectionObject = NULL;
@@ -407,6 +412,16 @@ static NTSTATUS VcamConnect(VOID) {
     }
 
     return STATUS_SUCCESS;
+}
+
+// The result is kept in the service key: when the camera opens but no frames
+// arrive, STATUS_OBJECT_NAME_NOT_FOUND here says the service is not creating
+// the section, and STATUS_SUCCESS says the frames are simply not being written.
+static NTSTATUS VcamConnect(VOID) {
+    NTSTATUS status = VcamConnectWorker();
+
+    VcamDiagSet(14, (ULONG)status);
+    return status;
 }
 
 //------------------------------------------------------------------------------
