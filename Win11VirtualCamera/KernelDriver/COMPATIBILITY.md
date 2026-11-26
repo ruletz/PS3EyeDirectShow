@@ -93,18 +93,24 @@ number measured inside a VM as a lower bound.
 
 Two more things worth knowing when the guest is virtual:
 
-- **Keep the USB 3.0 (xHCI) controller.** Switching the VM to the USB 2.0 (EHCI)
-  controller makes the camera enumerate and `init()` succeed — control transfers
-  work — but the isochronous IN endpoints never complete, so not a single frame
-  arrives. On xHCI the same VM delivered a 519-frame burst (~17 s at 30 fps)
-  before stalling.
-- **A stalled stream does not recover in the guest.** `pnputil /restart-device`
-  reports success, detaching and re-attaching the USB device in the hypervisor
-  does not help, and the camera keeps its LED lit because it still believes it
-  is streaming. Only a physical unplug/replug (a real VBUS cycle) clears it. If
-  the capture service was running at the time, kill it first: `PS3EYECam::stop()`
-  waits for the stuck transfer thread and the service stays in `STOP_PENDING`
-  until the process is terminated.
+- **The emulated controller will deliver nothing at all, and neither the
+  controller choice nor a device reset fixes it.** In this VM the camera
+  enumerates, binds to WinUSB, and `PS3EYECam::init()` succeeds (control
+  transfers are fine, the LED lights up because the device has been told to
+  stream), yet not one isochronous IN ever completes — `DiagDeliverStage` stays
+  at `NO_FRAME` and Chromium reports `AbortError: Timeout starting video
+  source`. Switching between the USB 3.0 (xHCI) and USB 2.0 (EHCI) controllers,
+  `pnputil /restart-device`, and even a physical unplug/replug were each tried
+  against a healthy, freshly powered device and all produced zero frames. The
+  only success ever seen here was a single 519-frame burst (~17 s at 30 fps)
+  immediately after one session started, after which the stream never recovered.
+  Treat the VM as a place to prove enumeration, the driver's device interface
+  and the connect/deliver plumbing — not to measure frame rate.
+- **A stalled stream does not recover in the guest.** If the stream dies while
+  the capture service is running, `PS3EYECam::stop()` waits on the stuck
+  transfer thread and the service sits in `STOP_PENDING` until the process is
+  killed. Kill the service before attempting any recovery; the device then needs
+  a physical unplug/replug (a real VBUS cycle) before it will stream again.
 
 ## Diagnosing a stream that does not start
 
