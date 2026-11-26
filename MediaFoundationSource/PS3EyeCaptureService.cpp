@@ -8,6 +8,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdarg>
+#include <cstdio>
 #include <thread>
 #include <vector>
 
@@ -19,6 +21,39 @@
 static SERVICE_STATUS g_serviceStatus = {0};
 static SERVICE_STATUS_HANDLE g_statusHandle = nullptr;
 static std::atomic<bool> g_running(true);
+
+// The service runs in session 0 with no console, and a camera that fails to
+// open leaves the driver's pin waiting forever, so note the milestones in a
+// file next to the machine's program data.
+static void ServiceLog(const char *format, ...) {
+  wchar_t programData[MAX_PATH];
+  wchar_t folder[MAX_PATH];
+  wchar_t path[MAX_PATH];
+  char line[512];
+  va_list args;
+  int length;
+  HANDLE file;
+  DWORD written;
+
+  if (GetEnvironmentVariableW(L"ProgramData", programData, MAX_PATH) == 0)
+    return;
+  swprintf_s(folder, L"%s\\PS3Eye", programData);
+  CreateDirectoryW(folder, nullptr);
+  swprintf_s(path, L"%s\\capture.log", folder);
+
+  va_start(args, format);
+  length = vsnprintf_s(line, sizeof(line), _TRUNCATE, format, args);
+  va_end(args);
+  if (length <= 0)
+    return;
+
+  file = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
+                     OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE)
+    return;
+  WriteFile(file, line, (DWORD)length, &written, nullptr);
+  CloseHandle(file);
+}
 
 void ReportServiceStatus(DWORD state, DWORD exitCode = 0, DWORD waitHint = 0) {
   static DWORD checkPoint = 1;
@@ -48,8 +83,11 @@ void WINAPI ServiceCtrlHandler(DWORD ctrl) {
 
 void CaptureLoop() {
   PS3EyeSharedMemoryServer sharedMemory;
-  if (!sharedMemory.Create())
+  if (!sharedMemory.Create()) {
+    ServiceLog("start: shared memory unavailable\n");
     return;
+  }
+  ServiceLog("start: shared memory created\n");
 
   ps3eye::PS3EYECam::PS3EYERef camera = nullptr;
   bool cameraActive = false;
@@ -65,12 +103,19 @@ void CaptureLoop() {
     if (cameraActive)
       return true;
     const auto &devices = ps3eye::PS3EYECam::getDevices(true);
-    if (devices.empty())
+    if (devices.empty()) {
+      ServiceLog("reader attached but no PS3 Eye found on USB\n");
       return false;
+    }
+    ServiceLog("reader attached, %d device(s) found\n", (int)devices.size());
     camera = devices[0];
     if (!camera->init(PS3EYE_WIDTH, PS3EYE_HEIGHT, PS3EYE_FPS,
-                      ps3eye::PS3EYECam::EOutputFormat::RGB))
+                      ps3eye::PS3EYECam::EOutputFormat::RGB)) {
+      ServiceLog("camera init failed\n");
+      camera.reset();
       return false;
+    }
+    ServiceLog("camera started (init ok)\n");
     camera->setAutogain(true);
     camera->setAutoWhiteBalance(true);
     camera->setFlip(false, true);
@@ -86,6 +131,7 @@ void CaptureLoop() {
       camera->stop();
     camera.reset();
     cameraActive = false;
+    ServiceLog("camera stopped\n");
   };
 
   while (g_running) {
@@ -102,6 +148,9 @@ void CaptureLoop() {
     }
 
     camera->getFrame(frameBuffer.data());
+
+    if (sharedMemory.GetFrameNumber() == 0)
+      ServiceLog("first frame captured\n");
 
     QueryPerformanceCounter(&currentTime);
     UINT64 timestamp =
