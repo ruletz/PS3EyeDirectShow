@@ -328,10 +328,15 @@ static VOID VcamEnsureReaderEvent(VOID) {
     HANDLE handle = NULL;
     PVOID eventObject = NULL;
 
+    // Never keep a reference to an event from an earlier open attempt. If the
+    // capture service restarted between two camera sessions, the object we are
+    // holding belongs to a process that is gone: signalling it wakes nobody and
+    // the new service never learns there is a reader, so it never starts the
+    // camera. Reopening by name always picks up the instance that exists now.
     if (g_Vcam.ReaderEvent != NULL) {
-        VcamDiagSet(15, 0);
-        KeSetEvent(g_Vcam.ReaderEvent, IO_NO_INCREMENT, FALSE);
-        return;
+        KeResetEvent(g_Vcam.ReaderEvent);
+        ObDereferenceObject(g_Vcam.ReaderEvent);
+        g_Vcam.ReaderEvent = NULL;
     }
 
     RtlInitUnicodeString(&eventName, PS3EYE_READER_EVENT_NAME);
@@ -586,6 +591,10 @@ static NTSTATUS VcamPinCreate(PKSPIN Pin, PIRP Irp) {
     // PASSIVE_LEVEL: the capture service may not exist yet, frames then simply
     // stay black until it does.
     if (first) {
+        // Drop whatever an earlier session left behind first. A service restart
+        // replaces the section and the reader event, and a view of the old
+        // section shows a frame number that never advances.
+        VcamDisconnect();
         status = VcamConnect();
         if (!NT_SUCCESS(status)) {
             DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
