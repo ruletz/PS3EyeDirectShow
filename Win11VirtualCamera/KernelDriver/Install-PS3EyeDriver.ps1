@@ -136,7 +136,12 @@ public static class PS3EyeRootDevice
         ref Guid classGuid, string deviceDescription, IntPtr hwndParent, int creationFlags,
         ref SP_DEVINFO_DATA deviceInfoData);
 
-    [DllImport("setupapi.dll", SetLastError = true)]
+    // CharSet.Unicode is required: without it this binds to the ANSI export,
+    // which rewrites the UTF-16 MULTI_SZ as one string per character. The node
+    // then carries hardware id "P";"S";"3";... and newdev reports
+    // "Unable to find any matching devices" (SPAPI_E_NO_SUCH_DEVINST,
+    // 0xE000020B), so the driver never binds while the device still shows as OK.
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool SetupDiSetDeviceRegistryProperty(IntPtr deviceInfoSet,
         ref SP_DEVINFO_DATA deviceInfoData, int property, byte[] propertyBuffer, int propertyBufferSize);
 
