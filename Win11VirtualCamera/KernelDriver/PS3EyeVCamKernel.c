@@ -43,10 +43,7 @@
 #define CDECL __cdecl
 #endif
 
-// ntifs.h, not ntddk.h: KAPC_STATE, KeStackAttachProcess and
-// KeUnstackDetachProcess are declared there (ntifs.h includes ntddk.h, so this
-// is a superset). The frame view has to be mapped in a known process context.
-#include <ntifs.h>
+#include <ntddk.h>
 
 // ks.h and ksmedia.h pick between user-mode and kernel declarations on
 // _NTDDK_; without it they fall into the user-mode branches and ask for DWORD,
@@ -197,6 +194,7 @@ typedef struct _VCAM_STATE {
     KTIMER Timer;
     KDPC TimerDpc;
     HANDLE SectionHandle;
+    PVOID SectionObject;           // referenced object, not a handle
     PKEVENT ReaderEvent;           // referenced object, not a handle
     PVOID MappedBase;
     SIZE_T MappedSize;
@@ -270,37 +268,17 @@ static NTSTATUS VcamDeviceCreate(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 // Shared memory access (PASSIVE_LEVEL only)
 //------------------------------------------------------------------------------
 
-// The frame view has to live in the system address space. ZwMapViewOfSection
-// maps into the *current* process, and this runs in the context of whichever
-// app opened the pin - so the base would be a user-mode address that only that
-// app can resolve. The timer DPC reads the view from the System process and
-// faulted on exactly that (bugcheck 0x7E, reading header->FrameNumber at
-// PS3EyeVCamKernel+0x1939). Attaching to the system process first puts the view
-// somewhere every context can reach it, and keeps a client process from having
-// driver-owned pages mapped into its own address space.
-static NTSTATUS VcamAttachToSystem(KAPC_STATE *ApcState) {
-    PEPROCESS systemProcess = NULL;
-    NTSTATUS status;
-
-    // The System process is pid 4. Looking it up by id avoids depending on
-    // whether the WDK header set happens to declare PsInitialSystemProcess.
-    status = PsLookupProcessByProcessId((HANDLE)(ULONG_PTR)4, &systemProcess);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    KeStackAttachProcess(systemProcess, ApcState);
-
-    // KeStackAttachProcess references the process itself, so the lookup
-    // reference is no longer needed while the thread stays attached.
-    ObDereferenceObject(systemProcess);
-    return STATUS_SUCCESS;
-}
-
-static VOID VcamDetachFromSystem(KAPC_STATE *ApcState) {
-    KeUnstackDetachProcess(ApcState);
-}
-
+// The frame view must be reachable from every thread context. ZwMapViewOfSection
+// maps into the *current* process, so the base is a user-mode address that only
+// the app which opened the pin can resolve - and VcamDeliverFrame also runs from
+// a timer DPC, in whatever context that DPC lands in. Both attempts at a
+// process-local view crashed on precisely that: bugcheck 0x7E in
+// VcamDeliverFrame (reading header->FrameNumber) and 0x3B in VcamConnect
+// (reading header->Magic) once the pin started running.
+//
+// MmMapViewInSystemSpace maps the section into the system address space instead,
+// which is valid regardless of process context, so the DPC and the client both
+// see the same pages. It takes the section object rather than a handle.
 static VOID VcamDisconnect(VOID) {
     if (g_Vcam.ReaderEvent != NULL) {
         // Tell the service the last reader is gone so it can park the camera.
@@ -309,15 +287,13 @@ static VOID VcamDisconnect(VOID) {
         g_Vcam.ReaderEvent = NULL;
     }
     if (g_Vcam.MappedBase != NULL) {
-        KAPC_STATE apcState;
-
-        // Unmap in the same process the view was created in (see VcamConnect).
-        if (NT_SUCCESS(VcamAttachToSystem(&apcState))) {
-            ZwUnmapViewOfSection(ZwCurrentProcess(), g_Vcam.MappedBase);
-            VcamDetachFromSystem(&apcState);
-        }
+        MmUnmapViewInSystemSpace(g_Vcam.MappedBase);
         g_Vcam.MappedBase = NULL;
         g_Vcam.MappedSize = 0;
+    }
+    if (g_Vcam.SectionObject != NULL) {
+        ObDereferenceObject(g_Vcam.SectionObject);
+        g_Vcam.SectionObject = NULL;
     }
     if (g_Vcam.SectionHandle != NULL) {
         ZwClose(g_Vcam.SectionHandle);
@@ -368,7 +344,7 @@ static VOID VcamEnsureReaderEvent(VOID) {
 static NTSTATUS VcamConnect(VOID) {
     UNICODE_STRING sectionName;
     OBJECT_ATTRIBUTES attributes;
-    KAPC_STATE apcState;
+    PVOID sectionObject = NULL;
     SIZE_T viewSize = 0;
     NTSTATUS status;
 
@@ -387,25 +363,30 @@ static NTSTATUS VcamConnect(VOID) {
         return status;
     }
 
-    // Map into the system process, not the caller's: the view is read from the
-    // timer DPC, which always runs in the System process.
-    status = VcamAttachToSystem(&apcState);
+    // MmMapViewInSystemSpace wants the section object. MmSectionObjectType is
+    // not declared by the WDK headers, so pass NULL for the type - the handle
+    // came from ZwOpenSection on this same name, so it is a section by
+    // construction.
+    status = ObReferenceObjectByHandle(g_Vcam.SectionHandle, SECTION_MAP_READ,
+                                       NULL, KernelMode, &sectionObject, NULL);
     if (!NT_SUCCESS(status)) {
         ZwClose(g_Vcam.SectionHandle);
         g_Vcam.SectionHandle = NULL;
         return status;
     }
-    status = ZwMapViewOfSection(g_Vcam.SectionHandle, ZwCurrentProcess(),
-                                &g_Vcam.MappedBase, 0, 0, NULL, &viewSize,
-                                ViewUnmap, 0, PAGE_READONLY);
-    VcamDetachFromSystem(&apcState);
+
+    // A zero size maps the whole section.
+    viewSize = 0;
+    status = MmMapViewInSystemSpace(sectionObject, &g_Vcam.MappedBase, &viewSize);
     if (!NT_SUCCESS(status)) {
+        ObDereferenceObject(sectionObject);
         ZwClose(g_Vcam.SectionHandle);
         g_Vcam.SectionHandle = NULL;
         g_Vcam.MappedBase = NULL;
         return status;
     }
 
+    g_Vcam.SectionObject = sectionObject;
     g_Vcam.MappedSize = viewSize;
 
     // Cache the frame layout; the header is stable for the life of the section.
