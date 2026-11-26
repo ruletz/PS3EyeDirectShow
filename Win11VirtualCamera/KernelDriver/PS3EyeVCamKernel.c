@@ -1,8 +1,12 @@
 // PS3EyeVCamKernel.c
 // Minimal AVStream (KS) camera minidriver for the PS3 Eye.
 //
-// UNTESTED: never compiled, never loaded. Reviewed against ks.h/ksmedia.h only;
-// see "Status" in README.md. The first msbuild run is the real review.
+// State: compiles with the WDK, loads on Windows 10 22H2 with `bcdedit /set
+// testsigning on` plus the build's test certificate trusted, and registers its
+// device node and pin descriptor (KS property queries on the pin succeed).
+// Open issue: Media Foundation opens the device and receives a successful data
+// intersection, but has not yet been observed creating a pin instance - see
+// "Status" in README.md.
 //
 // This is the low-level route: instead of the Windows 11 virtual camera API it
 // creates a real camera device node (root-enumerated, KSCATEGORY_VIDEO_CAMERA),
