@@ -69,9 +69,20 @@ process instead:
 
 - A watchdog thread checks the last frame time once a second. After **10 s** of
   silence while a pin is open it logs
-  `capture stalled 11 s after 30 frames (kernelReader=1): restarting the service process`
-  and calls `ExitProcess(1)` — the only way out of a blocked capture thread,
-  since `stop()` waits on that same thread.
+  `capture stalled 11 s after 30 frames (kernelReader=1): stopping the camera, then restarting the service process`,
+  sends the camera its stop-stream and LED-off registers, and only then calls
+  `ExitProcess(1)` — the way out of a blocked capture thread, since `stop()`'s
+  teardown waits on that same thread. The register writes have to come first:
+  exiting without them leaves the firmware streaming with nobody consuming it
+  and the LED lit until the camera is unplugged.
+- **An LED that stays on means the camera never got its stop request.** Nothing
+  on the host is then in a position to fix it by releasing a handle, because the
+  stream lives in the device, not in the process. The registers that clear it
+  are `0xe0 = 0x09`, then bit 7 of `0x21` cleared and bit 7 of `0x23` cleared
+  (the sequence in `PS3EYECam::stop()`); device interface `MI_00` is bound to
+  WinUSB, so they can be sent from any libusb caller without a driver install.
+  A VBUS cycle (unplug/replug) also clears it, and is the only option when the
+  device is gone from the bus.
 - `--install` registers SCM recovery actions: restart after 5 s, three attempts
   per 24 h. A camera that is genuinely gone therefore stops churning instead of
   restarting forever, and a camera that was only interrupted comes back on its

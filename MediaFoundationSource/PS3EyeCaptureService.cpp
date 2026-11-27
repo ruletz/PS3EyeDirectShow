@@ -217,9 +217,21 @@ void CaptureLoop() {
       if (idle < kStallSeconds)
         continue;
       ServiceLog("capture stalled %.0f s after %d frames (kernelReader=%d): "
-                 "restarting the service process\n",
+                 "stopping the camera, then restarting the service process\n",
                  idle, g_framesSeen.load(),
                  sharedMemory.HasKernelReader() ? 1 : 0);
+      // Tell the camera to stop before leaving. stop() issues the stop-stream
+      // and LED-off control transfers before it tears the transfers down, so
+      // this reaches the device even though the teardown will block on the
+      // stuck capture thread. It runs on a detached thread for that reason: we
+      // are not waiting for it, we only need the register writes to go out.
+      // Without this the camera keeps streaming with nobody consuming it and
+      // its LED stays lit until it is unplugged.
+      std::shared_ptr<ps3eye::PS3EYECam> stalled = camera;
+      if (stalled) {
+        std::thread([stalled]() { stalled->stop(); }).detach();
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+      }
       // The service control manager's recovery actions restart this service
       // (installed with --install); exiting is the only way out of a blocked
       // capture thread.
