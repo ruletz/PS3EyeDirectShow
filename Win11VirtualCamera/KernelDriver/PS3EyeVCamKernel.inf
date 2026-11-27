@@ -1,0 +1,78 @@
+; PS3EyeVCamKernel.inf
+; AVStream camera for the PS3 Eye, exposed as a software device.
+;
+; The installer creates the device through the Software Device API, so PnP
+; installs this package the same way it would for plugged-in hardware, and the
+; driver registers itself under KSCATEGORY_VIDEO_CAMERA so Windows treats it as
+; an ordinary webcam.
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=Media
+ClassGuid={4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider=%ProviderName%
+DriverVer=11/16/2026,1.0.0.0
+CatalogFile=PS3EyeVCamKernel.cat
+PnpLockdown=1
+
+; Every file named in a CopyFiles section must be listed here for Inf2Cat.
+[SourceDisksNames]
+1=%DiskName%,,,""
+
+[SourceDisksFiles]
+PS3EyeVCamKernel.sys=1,,
+
+[DestinationDirs]
+DefaultDestDir=12
+PS3Eye.CopyFiles=12
+
+[Manufacturer]
+%ProviderName%=PS3Eye,NTamd64
+
+[PS3Eye.NTamd64]
+%DeviceDesc%=PS3Eye_Install, PS3EyeVCam
+
+[PS3Eye_Install.NT]
+Include=ks.inf
+Needs=KS.Registration
+CopyFiles=PS3Eye.CopyFiles
+
+; The reference string has to match the filter's ReferenceGuid, because that is
+; the reference ks.sys uses when it registers the category interfaces at device
+; start. Naming them here is what makes the device appear under its own name
+; instead of the generic "AvStream Media Device".
+[PS3Eye_Install.NT.Interfaces]
+AddInterface=%KSCATEGORY_VIDEO_CAMERA%,%PS3EyeInterfaceRef%,PS3Eye.Interface
+AddInterface=%KSCATEGORY_CAPTURE%,%PS3EyeInterfaceRef%,PS3Eye.Interface
+
+[PS3Eye_Install.NT.Services]
+; 0x00000002 = SPSVCINST_ASSOCSERVICE. The flag has to be the literal value:
+; the token is not defined by the build, and an unresolved flag leaves the
+; service unassociated, which makes device installation fail with 0xE0000219.
+AddService=PS3EyeVCamKernel,0x00000002,PS3Eye.Service
+
+[PS3Eye.Service]
+DisplayName=%ServiceDesc%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\PS3EyeVCamKernel.sys
+
+[PS3Eye.CopyFiles]
+PS3EyeVCamKernel.sys,,,0x00000100
+
+[PS3Eye.Interface]
+AddReg=PS3Eye.Interface.AddReg
+
+[PS3Eye.Interface.AddReg]
+HKR,,FriendlyName,,%DeviceDesc%
+HKR,,Description,,%DeviceDesc%
+
+[Strings]
+ProviderName="PS3 Eye"
+DiskName="PS3 Eye Virtual Camera Installation Disk"
+DeviceDesc="PS3 Eye Camera"
+ServiceDesc="PS3 Eye Virtual Camera Driver"
+PS3EyeInterfaceRef="{7C1F0A53-9B2D-4E77-A3C8-51D9E0B4A6F1}"
+KSCATEGORY_VIDEO_CAMERA="{E5323777-F976-4F5B-9B55-B94699C46E44}"
+KSCATEGORY_CAPTURE="{65E8773D-8F56-11D0-A3B9-00A0C9223196}"

@@ -1,0 +1,11 @@
+; PS3EyeVCamSource.def
+; Exports required so regsvr32 can register the media source and the Frame
+; Server can CoCreate it.
+
+LIBRARY
+
+EXPORTS
+    DllGetClassObject   PRIVATE
+    DllCanUnloadNow     PRIVATE
+    DllRegisterServer   PRIVATE
+    DllUnregisterServer PRIVATE

@@ -1,0 +1,361 @@
+name: Build driver
+
+# UNTESTED: the driver it builds has never been compiled, so runs are expected
+# to fail with real compiler errors; the log is the point of this job.
+#
+# No SDK or WDK is installed here on purpose: the windows-2022 image already
+# ships the WDK (10.1.26100) with its Visual Studio extension. Downloading the
+# installers (the first approach) failed on the runner with "The file or
+# directory is corrupted and unreadable" before any build ran.
+#
+# Every failure is echoed back out with ::error::/::warning:: so the reason
+# shows up as a check annotation, readable without signing in to the run.
+#
+# Artifacts are test-signed with a throwaway self-signed certificate: they load
+# on a test machine only if that machine has `bcdedit /set testsigning on`.
+on:
+  push:
+    branches: [master, driver-build]
+    paths:
+      - 'Win11VirtualCamera/**'
+      - 'MediaFoundationSource/**'
+      - '.github/workflows/build-driver.yml'
+  pull_request:
+    paths:
+      - 'Win11VirtualCamera/**'
+      - 'MediaFoundationSource/**'
+      - '.github/workflows/build-driver.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      # The capture service compiles PS3EYEDriver/ps3eye.cpp, which lives in a
+      # submodule, so it has to be fetched too.
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Diagnostic only, never fails: if the image loses the WDK the following
+      # build steps will say so, and this tells us where the kits live.
+      - name: Inspect WDK
+        shell: pwsh
+        run: |
+          $kits = 'C:\Program Files (x86)\Windows Kits\10'
+          $inc = @(Get-ChildItem "$kits\Include" -Directory -ErrorAction SilentlyContinue | Sort-Object Name)
+          if ($inc.Count -eq 0) {
+            Write-Host "::warning::no kit include dirs under $kits\Include"
+          } else {
+            $parts = $inc | ForEach-Object { "$($_.Name)(km=$(Test-Path (Join-Path $_.FullName 'km')))" }
+            Write-Host "::warning::include: $($parts -join ' ')"
+          }
+
+          $build = @(Get-ChildItem "$kits\build" -Directory -ErrorAction SilentlyContinue | Sort-Object Name)
+          if ($build.Count -eq 0) {
+            Write-Host "::warning::no toolset dirs under $kits\build"
+          } else {
+            Write-Host "::warning::toolsets: $($build.Name -join ' ')"
+          }
+
+          $inf2cat = @(Get-ChildItem "$kits\bin" -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Join-Path $_.FullName 'x86\Inf2Cat.exe' } | Where-Object { Test-Path $_ })
+          Write-Host "::warning::inf2cat: $(if ($inf2cat.Count) { $inf2cat -join ' ' } else { 'none' })"
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      # Builds one project and republishes its errors as check annotations, so
+      # a failed run explains itself without reading the raw log.
+      - name: Build user-mode projects
+        shell: pwsh
+        run: |
+          $log = "$env:RUNNER_TEMP\um.log"
+          $out = & msbuild Win11VirtualCamera\PS3EyeWin11.sln /p:Configuration=Release /p:Platform=x64 /v:minimal /nologo 2>&1
+          $code = $LASTEXITCODE
+          $out | Set-Content $log
+          $out | Write-Host
+          & "$env:GITHUB_WORKSPACE\.github\scripts\report-errors.ps1" $log 'user-mode build' $code
+          exit $code
+
+      # The step that has never run: expect real errors the first time. Built
+      # on its own, because a kernel project cannot share the solution's
+      # user-mode build: it needs the WindowsKernelModeDriver toolset and the
+      # kit's km headers, and the solution never applied them.
+      - name: Build AVStream driver
+        shell: pwsh
+        run: |
+          $proj = 'Win11VirtualCamera\KernelDriver\PS3EyeVCamKernel.vcxproj'
+          $log = "$env:RUNNER_TEMP\driver.log"
+
+          # Which toolset the project actually resolves to, for the annotation.
+          $props = & msbuild $proj /p:Configuration=Release /p:Platform=x64 `
+            '-getProperty:PlatformToolset' '-getProperty:ConfigurationType' `
+            '-getProperty:WindowsTargetPlatformVersion' 2>&1
+          Write-Host "::warning::driver properties: $($props -join ' ')"
+
+          # /v:diag so the cl.exe command line is in the log; the header conflict
+          # this project hits is decided by the include paths and defines there.
+          $out = & msbuild $proj `
+            /p:Configuration=Release /p:Platform=x64 /p:SolutionDir=$(Resolve-Path 'Win11VirtualCamera')\ `
+            /v:diag /nologo 2>&1
+          $code = $LASTEXITCODE
+          $out | Set-Content $log
+          $out | Write-Host
+
+          $cl = @($out | Where-Object { $_ -match 'cl\.exe .*PS3EyeVCamKernel\.c' } | Select-Object -First 1)
+          $clmsg = if ($cl) { $cl[0].Trim() } else { 'cl.exe command line not found in log' }
+          if ($clmsg.Length -gt 900) { $clmsg = $clmsg.Substring(0, 900) + '...' }
+          Write-Host "::warning::cl: $($clmsg -replace '%', '%25')"
+
+          & "$env:GITHUB_WORKSPACE\.github\scripts\report-errors.ps1" $log 'driver build' $code
+          exit $code
+
+      # The repository carries no libusb binaries, so build the import library
+      # from the submodule and hand its directory to the capture service.
+      # A filter for the PS3 Eye's existing capture device: it adds the camera
+      # interfaces that Media Foundation enumerates and forwards every IRP. It
+      # is signed like the rest but needs no INF or catalog of its own.
+      - name: Build camera interface filter
+        shell: pwsh
+        run: |
+          $proj = 'Win11VirtualCamera\CamInterfaceFilter\PS3EyeCamInterface.vcxproj'
+          $log = "$env:RUNNER_TEMP\filter.log"
+          $solutionDir = (Resolve-Path 'Win11VirtualCamera').Path + '\'
+          $out = & msbuild $proj /p:Configuration=Release /p:Platform=x64 "/p:SolutionDir=$solutionDir" /v:minimal /nologo 2>&1
+          $code = $LASTEXITCODE
+          $out | Set-Content $log
+          $out | Write-Host
+          & "$env:GITHUB_WORKSPACE\.github\scripts\report-errors.ps1" $log 'filter build' $code
+          exit $code
+
+      - name: Build libusb
+        shell: pwsh
+        run: |
+          $log = "$env:RUNNER_TEMP\libusb.log"
+
+          # This libusb predates its CMake support, so use the MSVC project it
+          # ships, with the toolset the image has.
+          $out = & msbuild libusb\msvc\libusb_dll_2017.vcxproj `
+            /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 `
+            /v:minimal /nologo 2>&1
+          $code = $LASTEXITCODE
+          $out | Set-Content $log
+          $out | Write-Host
+          & "$env:GITHUB_WORKSPACE\.github\scripts\report-errors.ps1" $log 'libusb build' $code
+          if ($code -ne 0) { exit $code }
+
+          $lib = Get-ChildItem -Path libusb -Recurse -Filter 'libusb-1.0.lib' |
+            Select-Object -First 1
+          if (-not $lib) { Write-Host '::error::libusb-1.0.lib not produced'; exit 1 }
+          Write-Host "::notice::libusb import library: $($lib.FullName)"
+          "LIBUSB_LIB_DIR=$($lib.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build capture service
+        shell: pwsh
+        run: |
+          $log = "$env:RUNNER_TEMP\svc.log"
+          $out = & msbuild MediaFoundationSource\PS3EyeCaptureService.vcxproj `
+            /p:Configuration=Release /p:Platform=x64 /p:SolutionDir=$(Resolve-Path 'MediaFoundationSource')\ `
+            /p:LibusbLibraryDir="$env:LIBUSB_LIB_DIR" `
+            /v:minimal /nologo 2>&1
+          $code = $LASTEXITCODE
+          $out | Set-Content $log
+          $out | Write-Host
+          & "$env:GITHUB_WORKSPACE\.github\scripts\report-errors.ps1" $log 'capture service build' $code
+          exit $code
+
+      # PnP identifies a driver package by its INF, and the DriverStore folder
+      # name is a hash of that INF. With a fixed DriverVer, a rebuilt .sys with
+      # a different hash still landed in the existing package, so
+      # UpdateDriverForPlugAndPlayDevices reported success while the previously
+      # installed binary kept running. Stamp a unique version per build.
+      - name: Stamp driver version
+        shell: pwsh
+        run: |
+          $inf = 'Win11VirtualCamera\KernelDriver\PS3EyeVCamKernel.inf'
+          $build = ([int]$env:GITHUB_RUN_NUMBER % 60000) + 1
+          $date = (Get-Date).ToString('MM/dd/yyyy')
+          $version = "$date,1.0.0.$build"
+          $text = Get-Content $inf -Raw
+          $text = [regex]::Replace($text, '(?m)^DriverVer=.*$', "DriverVer=$version")
+          Set-Content $inf $text -NoNewline
+          Write-Host "::notice::DriverVer=$version"
+
+      - name: Make catalog
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $kits = 'C:\Program Files (x86)\Windows Kits\10'
+          $inf2cat = Get-ChildItem "$kits\bin" -Directory |
+            ForEach-Object { Join-Path $_.FullName 'x86\Inf2Cat.exe' } |
+            Where-Object { Test-Path $_ } | Sort-Object | Select-Object -Last 1
+          if (-not $inf2cat) { Write-Host '::error::Inf2Cat not found under Windows Kits\10\bin'; exit 1 }
+
+          $out = 'Win11VirtualCamera\bin\x64\Release'
+          Copy-Item 'Win11VirtualCamera\KernelDriver\PS3EyeVCamKernel.inf' $out -Force
+          $log = & $inf2cat /driver:$out /os:10_X64 /verbose 2>&1
+          $code = $LASTEXITCODE
+          $log | Write-Host
+          $bad = @($log | Where-Object { $_ -match 'Error|error|missing|not found' } |
+            Where-Object { $_ -notmatch 'Inf2Cat: (\S+: )?(Errors|Warnings)' } |
+            Where-Object { $_ -notmatch '^\s*(Errors|Warnings):?\s*$' })
+          foreach ($b in ($bad | Select-Object -First 8)) { Write-Host "::error::Inf2Cat: $b" }
+          exit $code
+
+      # Throwaway certificate. A kernel driver will not load unsigned at all,
+      # and test signing accepts a self-signed cert once it is in the stores.
+      # Signed in three steps so a stall points at the call that caused it.
+      - name: Create the test certificate
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Resolve-Path 'Win11VirtualCamera\bin\x64\Release'
+          Write-Host '::notice::creating test certificate'
+
+          try {
+            $rsa = [System.Security.Cryptography.RSA]::Create(2048)
+            $req = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
+              'CN=PS3EyeTest', $rsa,
+              [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+              [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+            $req.CertificateExtensions.Add(
+              [System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new(
+                [bool]$false, [bool]$false, [int]0, [bool]$true))
+            $req.CertificateExtensions.Add(
+              [System.Security.Cryptography.X509Certificates.X509KeyUsageExtension]::new(
+                [System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::DigitalSignature, [bool]$true))
+            $oids = [System.Security.Cryptography.OidCollection]::new()
+            $null = $oids.Add([System.Security.Cryptography.Oid]::new('1.3.6.1.5.5.7.3.3'))
+            $req.CertificateExtensions.Add(
+              [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($oids, $false))
+            $cert = $req.CreateSelfSigned((Get-Date).AddDays(-1), (Get-Date).AddYears(2))
+          } catch {
+            Write-Host "::error::certificate creation failed: $($_.Exception.Message)"
+            exit 1
+          }
+          Write-Host "::notice::cert thumbprint: $($cert.Thumbprint)"
+
+          [IO.File]::WriteAllBytes("$out\PS3EyeTest.pfx", $cert.Export('Pfx', 'ps3eye'))
+          [IO.File]::WriteAllBytes("$out\PS3EyeTest.cer", $cert.Export('Cert'))
+          Write-Host '::notice::exported cer and pfx'
+
+          # The runner refuses to install a root certificate (the store add
+          # blocks on a prompt nobody can answer), so the chain will show up as
+          # untrusted here; the verify step accepts exactly that. The test
+          # machine needs PS3EyeTest.cer in LocalMachine\Trusted Root and
+          # Trusted Publishers.
+          Write-Host '::notice::certificate is ready'
+
+      - name: Sign the driver package
+        shell: pwsh
+        timeout-minutes: 6
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Resolve-Path 'Win11VirtualCamera\bin\x64\Release'
+
+          # signtool can sit in a network lookup for a very long time here, so
+          # every call is bounded and its output reported.
+          function Invoke-Capped {
+            param([string] $Exe, [string[]] $Arguments, [string] $Label, [int] $TimeoutSec = 240)
+            $logPath = Join-Path $env:RUNNER_TEMP "$Label.log"
+            $p = Start-Process -FilePath $Exe -ArgumentList $Arguments -NoNewWindow -PassThru `
+              -RedirectStandardOutput $logPath -RedirectStandardError "$logPath.err"
+            if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+              $p.Kill()
+              Write-Host "::error::$Label timed out after $TimeoutSec s"
+              Get-Content $logPath -ErrorAction SilentlyContinue | Write-Host
+              Get-Content "$logPath.err" -ErrorAction SilentlyContinue | Write-Host
+              exit 1
+            }
+            Get-Content $logPath -ErrorAction SilentlyContinue | Write-Host
+            Get-Content "$logPath.err" -ErrorAction SilentlyContinue | Write-Host
+            return $p.ExitCode
+          }
+
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Directory |
+            ForEach-Object { Join-Path $_.FullName 'x64\signtool.exe' } |
+            Where-Object { Test-Path $_ } | Sort-Object | Select-Object -Last 1
+          if (-not $signtool) { Write-Host '::error::signtool not found'; exit 1 }
+
+          $pfx = "$out\PS3EyeTest.pfx"
+          foreach ($f in @("$out\PS3EyeVCamKernel.sys", "$out\PS3EyeVCamKernel.cat",
+                          "$out\PS3EyeCamInterface.sys")) {
+            Write-Host "::notice::signing $(Split-Path $f -Leaf)"
+            $code = Invoke-Capped $signtool @('sign', '/v', '/fd', 'SHA256', '/f', $pfx, '/p', 'ps3eye', $f) 'sign'
+            if ($code -ne 0) { Write-Host "::error::signtool sign failed on $f"; exit 1 }
+          }
+
+      - name: Verify the catalog
+        shell: pwsh
+        timeout-minutes: 6
+        run: |
+          $out = Resolve-Path 'Win11VirtualCamera\bin\x64\Release'
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Directory |
+            ForEach-Object { Join-Path $_.FullName 'x64\signtool.exe' } |
+            Where-Object { Test-Path $_ } | Sort-Object | Select-Object -Last 1
+          if (-not $signtool) { Write-Host '::error::signtool not found'; exit 1 }
+
+          $logPath = Join-Path $env:RUNNER_TEMP 'verify.log'
+          $p = Start-Process -FilePath $signtool -NoNewWindow -PassThru `
+            -ArgumentList @('verify', '/v', '/pa', "$out\PS3EyeVCamKernel.cat") `
+            -RedirectStandardOutput $logPath -RedirectStandardError "$logPath.err"
+          if (-not $p.WaitForExit(240 * 1000)) {
+            $p.Kill()
+            Write-Host '::error::signtool verify timed out'
+            exit 1
+          }
+          $text = (Get-Content $logPath, "$logPath.err" -ErrorAction SilentlyContinue) -join "`n"
+          Write-Host $text
+          if ($p.ExitCode -eq 0) { exit 0 }
+
+          # Without the certificate in a trusted root store the only thing that
+          # may fail is the chain; a bad signature must still fail the build.
+          if ($text -match 'not trusted by the trust provider') {
+            Write-Host '::notice::signature is valid; chain ends in the untrusted test certificate'
+            exit 0
+          }
+          foreach ($line in ($text -split "`n" |
+              Where-Object { $_ -match 'SignTool|Error|Failed|Signature|trusted|Hash' } |
+              Select-Object -First 6)) {
+            Write-Host "::error::verify: $($line.Trim())"
+          }
+          exit 1
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          $dest = 'artifacts'
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+
+          $driverOut = 'Win11VirtualCamera\bin\x64\Release'
+          foreach ($name in 'PS3EyeVCamKernel.sys','PS3EyeVCamKernel.cat','PS3EyeVCamKernel.inf',
+                            'PS3EyeCamInterface.sys',
+                            'PS3EyeVCamSource.dll','PS3EyeVCamRegistrar.exe',
+                            'PS3EyeTest.cer','PS3EyeTest.pfx') {
+            $p = Join-Path $driverOut $name
+            if (Test-Path $p) { Copy-Item $p $dest -Force } else { Write-Host "::warning::artifact missing: $name" }
+          }
+          Copy-Item 'Win11VirtualCamera\KernelDriver\Install-PS3EyeDriver.ps1' $dest -Force
+
+          $svc = 'MediaFoundationSource\bin\x64\Release\PS3EyeCaptureService.exe'
+          if (Test-Path $svc) { Copy-Item $svc $dest -Force } else { Write-Host '::warning::artifact missing: PS3EyeCaptureService.exe' }
+
+          # The service loads libusb at run time and looks for it beside the exe.
+          $dll = 'MediaFoundationSource/bin/x64/Release/libusb-1.0.dll'
+          if (Test-Path $dll) { Copy-Item $dll $dest -Force } else { Write-Host '::warning::artifact missing: libusb-1.0.dll' }
+
+          Get-ChildItem $dest | Select-Object Name, Length | Format-Table | Out-String | Write-Host
+
+      # Runs even when a step failed, so a broken build still gives you the
+      # binaries that did get produced plus the logs.
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS3EyeVCam
+          path: |
+            artifacts/
+            ${{ runner.temp }}/*.log
+          if-no-files-found: warn

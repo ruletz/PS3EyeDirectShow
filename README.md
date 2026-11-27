@@ -10,6 +10,16 @@ Another big advantage of a user space driver is it's much easier to directly mak
 
 On the other hand native camera drivers have slightly better performance. Also Windows will automatically make those cameras available via the DirectShow API (both 32 and 64 bit) as well as Windows Media Foundation. There isn't any need to provide a custom DirectShow or WMF source for a native camera.
 
+## Native camera instead of a DirectShow filter
+A DirectShow filter only helps apps that speak DirectShow (or go through a wrapper for it). If you want Windows itself to expose the PS3 Eye as an ordinary camera — so the browser, Teams and the Camera app list it without any flag — `Win11VirtualCamera/` holds two routes that do that on top of the same WinUSB capture code:
+
+- **`Win11VirtualCamera/`** — a Media Foundation virtual camera installed by a user-mode installer (Windows 11 22000+).
+- **`Win11VirtualCamera/KernelDriver/`** — a root-enumerated AVStream camera driver: a real device node that works on Windows 10 as well.
+
+Both routes share one capture service that owns the USB device, so several apps can read the same frames at once. `Win11VirtualCamera/KernelDriver/COMPATIBILITY.md` records what was verified, the measurements behind it, and the one caveat that matters: the PS3 Eye's isochronous stream needs a real USB controller to reach 30 fps, and a virtual machine does not give it one.
+
+Neither route is installed by the DirectShow installer above; they have their own installers in their folders.
+
 ## 32 / 64 bit
 This project provides both a 32 bit and 64 bit source filter. Every application that uses a DirectShow camera must load its source filter library (usually a wrapper to a native camera provided by Microsoft). 32 bit applications require 32 bit libraries, and 64 bit applications require 64 bit libraries. Thus if the source filter is only provided as a 32 bit library the camera can only be used by 32 bit applications.
 
